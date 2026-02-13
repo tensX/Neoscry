@@ -1,12 +1,12 @@
 # Neoscry 🎙️📝
 
 [![GitHub stars](https://img.shields.io/github/stars/tensX/Neoscry?logo=github)](https://github.com/tensX/Neoscry/stargazers)
-![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-0f172a)
 ![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![UI](https://img.shields.io/badge/UI-PySide6-41CD52)
 ![ASR](https://img.shields.io/badge/ASR-Whisper-f97316)
 
-Dual-source call/meeting recorder + AI transcription (speech-to-text) for Windows.
+Dual-source call/meeting recorder + AI transcription (speech-to-text).
 
 - You: microphone input
 - Other side: system output via WASAPI loopback (Windows)
@@ -41,8 +41,10 @@ Typical use cases: call recording, meeting notes, interviews, podcasts, voice me
 - Live transcription (draft) while recording + final transcription after stopping
 - Export to TXT and JSON
 - GPU acceleration options: `auto/cuda/cpu` and compute type (`float16`, `int8`, ...)
+- Built-in source testing (record a few seconds, then play back)
+- Settings menu (gear): UI language (RU/EN), always-on-top, live draft
 
-### Quick start (Windows)
+### Quick start
 
 Requirements:
 - Python 3.11+
@@ -58,6 +60,11 @@ Run:
 ```bash
 python run.py
 ```
+
+### Platform notes
+
+- Windows: loopback capture uses WASAPI.
+- Linux: loopback depends on your audio stack (PulseAudio / PipeWire). You may need to select a monitor source ("*.monitor") as the “other side” input device.
 
 ### How to use
 
@@ -86,7 +93,12 @@ Each session creates `sessions/<YYYYMMDD-HHMMSS>/`:
 ### Notes / troubleshooting
 
 - Loopback capture depends on Windows audio drivers and virtual devices (Voicemeeter, etc.).
-- If you see `data discontinuity in recording`, it means the OS/audio backend could not deliver audio in time (temporary gaps). Disabling live mode and/or lowering system load can help.
+- If you previously saw `data discontinuity in recording` warnings from `soundcard`, the app now hides them to keep the console clean.
+
+### Settings storage
+
+- Windows: registry `HKEY_CURRENT_USER\Software\Neoscry\Neoscry`
+- Linux: via Qt settings (typically under `~/.config/Neoscry/`)
 
 ## Keywords (EN)
 
@@ -109,8 +121,10 @@ Neoscry записывает разговор из двух источников
 - Лайв транскрипция (черновик) во время записи + финальная транскрипция после остановки
 - Экспорт: TXT и JSON
 - Ускорение на GPU: `auto/cuda/cpu` и `compute` (`float16`, `int8`, ...)
+- Тест источников (пишет пару секунд, затем воспроизводит)
+- Меню настроек (⚙): язык интерфейса (RU/EN), поверх всех окон, лайв-черновик
 
-### Быстрый старт (Windows)
+### Быстрый старт
 
 Требования:
 - Python 3.11+
@@ -154,7 +168,12 @@ python run.py
 ### Примечания / устранение проблем
 
 - На Windows loopback/виртуальные устройства зависят от драйверов (Voicemeeter и т.п.).
-- Warning `data discontinuity in recording` означает, что в записи были краткие разрывы (не успели вовремя прочитать аудио). Часто помогает выключить лайв и/или снизить нагрузку.
+- Раньше могли появляться warnings `data discontinuity in recording` (soundcard). Теперь приложение их скрывает, чтобы не засорять консоль.
+
+### Где хранятся настройки
+
+- Windows: реестр `HKEY_CURRENT_USER\Software\Neoscry\Neoscry`
+- Linux: настройки Qt (обычно `~/.config/Neoscry/`)
 
 ## Ключевые слова (RU)
 

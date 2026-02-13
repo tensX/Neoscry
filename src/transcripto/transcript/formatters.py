@@ -20,18 +20,34 @@ class TranscriptMeta:
     duration_s: float
 
 
-def to_pretty_txt(meta: TranscriptMeta, segments: list[Segment]) -> str:
+def to_pretty_txt(meta: TranscriptMeta, segments: list[Segment], ui_lang: str = "ru") -> str:
     lines: list[str] = []
-    lines.append("Транскрипт")
-    lines.append(f"Дата: {meta.created_at}")
-    lines.append(f"Язык: {meta.language}")
-    lines.append(f"Модель: {meta.model}")
-    lines.append(f"Длительность: {format_hhmmss(meta.duration_s)}")
-    lines.append(f"Микрофон: {meta.mic_device}")
-    lines.append(f"Выход/loopback: {meta.output_device}")
+
+    ui_lang = str(ui_lang).strip().lower()
+    if ui_lang not in ("ru", "en"):
+        ui_lang = "ru"
+
+    if ui_lang == "en":
+        lines.append("Transcript")
+        lines.append(f"Date: {meta.created_at}")
+        lines.append(f"Language: {meta.language}")
+        lines.append(f"Model: {meta.model}")
+        lines.append(f"Duration: {format_hhmmss(meta.duration_s)}")
+        lines.append(f"Microphone: {meta.mic_device}")
+        lines.append(f"Output/loopback: {meta.output_device}")
+    else:
+        lines.append("Транскрипт")
+        lines.append(f"Дата: {meta.created_at}")
+        lines.append(f"Язык: {meta.language}")
+        lines.append(f"Модель: {meta.model}")
+        lines.append(f"Длительность: {format_hhmmss(meta.duration_s)}")
+        lines.append(f"Микрофон: {meta.mic_device}")
+        lines.append(f"Выход/loopback: {meta.output_device}")
     lines.append("")
 
     def speaker_label(speaker: str) -> str:
+        if ui_lang == "en":
+            return "Me" if speaker == "me" else "Other"
         return "Я" if speaker == "me" else "Собеседник"
 
     for s in segments:
