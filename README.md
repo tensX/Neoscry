@@ -69,17 +69,17 @@ python run.py
 ### How to use
 
 1) Pick sources:
-- Enable `Записывать микрофон` and select your microphone
-- Enable `Записывать выход` and select the “other side” source
+- Enable `Record microphone` and select your microphone
+- Enable `Record output` and select the “other side” source
 
 2) Pick ASR settings:
 - Model: best quality is usually `large-v3`
 - Device: `cuda` (if available) or `cpu`
 - Compute: for CUDA, `float16` is a common choice
 
-3) Optional: enable `Лайв транскрипция` (live draft while recording).
+3) Optional: enable `Live transcription (draft)`.
 
-4) Click `Старт записи`, then `Стоп + транскрибировать` for the final transcript.
+4) Click `Start recording`, then `Stop + transcribe` for the final transcript.
 
 ### Where results are saved
 
