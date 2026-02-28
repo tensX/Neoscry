@@ -40,6 +40,7 @@ class WhisperTranscriber:
         self,
         model_name: str = "large-v3",
         language: str = "ru",
+        ui_lang: str = "ru",
         beam_size: int = 5,
         vad_filter: bool = True,
         device: str = "auto",  # "auto" | "cuda" | "cpu"
@@ -47,6 +48,7 @@ class WhisperTranscriber:
     ) -> None:
         self._model_name = model_name
         self._language = language
+        self._ui_lang = str(ui_lang).strip().lower() or "ru"
         self._beam_size = int(beam_size)
         self._vad_filter = bool(vad_filter)
         self._device = str(device)
@@ -80,10 +82,13 @@ class WhisperTranscriber:
                 return self._model
             except Exception as e:
                 if pref == "cuda":
+                    if self._ui_lang == "en":
+                        raise RuntimeError(
+                            "CUDA selected, but initialization failed. "
+                            "Most likely a CPU-only build of ctranslate2 is installed. "
+                            f"Original error: {e}"
+                        )
                     raise RuntimeError(
-                        "CUDA selected, but initialization failed. "
-                        "Most likely a CPU-only build of ctranslate2 is installed. "
-                        f"Original error: {e}\n\n"
                         "CUDA выбран, но инициализация не удалась. "
                         "Скорее всего установлен CPU-only ctranslate2. "
                         f"Оригинальная ошибка: {e}"

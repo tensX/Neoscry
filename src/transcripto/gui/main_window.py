@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import traceback
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,7 +12,7 @@ import soundcard as sc
 import soundfile as sf
 import time
 
-from PySide6.QtCore import QSettings, Qt, QThread, Signal, QTimer
+from PySide6.QtCore import QObject, QProcess, QSettings, Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -63,6 +64,7 @@ class TranscribeWorker(QThread):
 
     def __init__(
         self,
+        parent: QObject | None,
         rec_samplerate: int,
         mic_path: str,
         loop_path: str,
@@ -75,7 +77,7 @@ class TranscribeWorker(QThread):
         duration_s: float,
         ui_lang: str = "ru",
     ) -> None:
-        super().__init__()
+        super().__init__(parent)
         self._rec_samplerate = rec_samplerate
         self._mic_path = mic_path
         self._loop_path = loop_path
@@ -94,6 +96,7 @@ class TranscribeWorker(QThread):
             tr = WhisperTranscriber(
                 model_name=self._model_name,
                 language=self._language,
+                ui_lang=self._ui_lang,
                 device=self._device,
                 compute_type=self._compute_type,
             )
@@ -150,6 +153,7 @@ class MainWindow(QMainWindow):
         self._last_json: str | None = None
         self._last_session: SessionPaths | None = None
         self._worker: TranscribeWorker | None = None
+        self._proc: QProcess | None = None
         self._live_enabled = False
         self._live_segments: list[Segment] = []
         self._live_worker: LiveWorker | None = None
@@ -253,6 +257,11 @@ class MainWindow(QMainWindow):
         alay.addWidget(self.btn_settings)
 
         self.settings_menu = QMenu(self)
+
+        self.act_transcribe_session = QAction(self)
+        self.settings_menu.addAction(self.act_transcribe_session)
+        self.settings_menu.addSeparator()
+
         self.act_live = QAction(self)
         self.act_live.setCheckable(True)
         self.settings_menu.addAction(self.act_live)
@@ -312,6 +321,8 @@ class MainWindow(QMainWindow):
         self.act_on_top.toggled.connect(lambda v: self._set("ui/always_on_top", bool(v)))
         self.act_lang_ru.triggered.connect(lambda: self._set_ui_language("ru"))
         self.act_lang_en.triggered.connect(lambda: self._set_ui_language("en"))
+
+        self.act_transcribe_session.triggered.connect(self._on_transcribe_existing_session)
 
         self._set_start_button_state("idle")
 
@@ -460,6 +471,7 @@ class MainWindow(QMainWindow):
 
         # Settings menu
         self.btn_settings.setToolTip(self._tr("Настройки", "Settings"))
+        self.act_transcribe_session.setText(self._tr("Повторная транскрипция...", "Re-transcribe session..."))
         self.act_live.setText(self._tr("Лайв транскрипция (черновик)", "Live transcription (draft)"))
         self.act_on_top.setText(self._tr("Поверх всех окон", "Always on top"))
         self.lang_menu.setTitle(self._tr("Язык интерфейса", "UI language"))
@@ -488,6 +500,273 @@ class MainWindow(QMainWindow):
                 self._start_live_if_enabled()
         else:
             self._stop_live()
+
+    def _on_transcribe_existing_session(self) -> None:
+        try:
+            if self._recorder is not None or self._start_timer is not None or self._test_worker is not None:
+                QMessageBox.information(
+                    self,
+                    self._tr("Транскрипция", "Transcription"),
+                    self._tr(
+                        "Остановите запись/тест перед повторной транскрипцией",
+                        "Stop recording/testing before re-transcribing",
+                    ),
+                )
+                return
+
+            if self._proc is not None and self._proc.state() != QProcess.ProcessState.NotRunning:
+                QMessageBox.information(
+                    self,
+                    self._tr("Транскрипция", "Transcription"),
+                    self._tr(
+                        "Транскрипция уже выполняется",
+                        "Transcription is already running",
+                    ),
+                )
+                return
+
+            base = Path(os.getcwd()) / "sessions"
+            start_dir = str(base) if base.exists() else os.getcwd()
+            session_dir = QFileDialog.getExistingDirectory(
+                self,
+                self._tr("Выберите папку сессии", "Select a session folder"),
+                start_dir,
+            )
+            if not session_dir:
+                return
+
+            root = Path(session_dir)
+            session = SessionPaths(
+                root=root,
+                mic_wav=root / "mic.wav",
+                loop_wav=root / "loopback.wav",
+                transcript_txt=root / "transcript.txt",
+                transcript_json=root / "transcript.json",
+            )
+            self._last_session = session
+
+            self._start_transcription_for_session(session)
+        except Exception:
+            QMessageBox.critical(self, self._tr("Ошибка", "Error"), traceback.format_exc())
+
+    def _start_transcription_for_session(self, session: SessionPaths) -> None:
+        try:
+            self._start_transcription_for_session_impl(session)
+        except Exception:
+            QMessageBox.critical(self, self._tr("Ошибка", "Error"), traceback.format_exc())
+
+    def _start_transcription_for_session_impl(self, session: SessionPaths) -> None:
+        def _non_empty(p: Path) -> bool:
+            try:
+                return p.exists() and p.stat().st_size > 4096
+            except Exception:
+                return False
+
+        has_mic = _non_empty(session.mic_wav)
+        has_out = _non_empty(session.loop_wav)
+
+        if not has_mic and not has_out:
+            QMessageBox.warning(
+                self,
+                self._tr("Пустая запись", "Empty recording"),
+                self._tr(
+                    "Не найдены непустые файлы mic.wav/loopback.wav в выбранной сессии",
+                    "No non-empty mic.wav/loopback.wav found in the selected session",
+                ),
+            )
+            return
+
+        # Derive samplerate/duration from files.
+        sr = 48000
+        dur = 0.0
+        for p in (session.mic_wav, session.loop_wav):
+            if not _non_empty(p):
+                continue
+            try:
+                info = sf.info(str(p))
+                if getattr(info, "samplerate", None):
+                    sr = int(info.samplerate)
+                if getattr(info, "frames", None) and sr > 0:
+                    dur = max(dur, float(info.frames) / float(sr))
+            except Exception:
+                pass
+
+        session_root = str(session.root)
+        self.transcript_view.setPlainText(
+            self._tr(
+                f"Повторная транскрипция...\nСессия: {session_root}\n",
+                f"Re-transcribing...\nSession: {session_root}\n",
+            )
+        )
+
+        mic_path = str(session.mic_wav) if has_mic else ""
+        out_path = str(session.loop_wav) if has_out else ""
+
+        self.progress.setValue(0)
+        self._last_txt = None
+        self._last_json = None
+        self.btn_export_txt.setEnabled(False)
+        self.btn_export_json.setEnabled(False)
+
+        mic_label = self._tr("микрофон (из файла)", "microphone (from file)") if has_mic else ""
+        out_label = self._tr("собеседник (из файла)", "other side (from file)") if has_out else ""
+
+        model_name = str(self.model_combo.currentText())
+        language = (self.lang_edit.text() or "ru").strip()
+        device = str(self.device_combo.currentText())
+        compute = str(self.compute_combo.currentText())
+
+        self.btn_start.setEnabled(False)
+
+        self._start_transcription_process(
+            session=session,
+            mic_path=mic_path,
+            out_path=out_path,
+            samplerate=sr,
+            duration_s=dur,
+            mic_label=mic_label,
+            out_label=out_label,
+        )
+
+    def _on_transcribe_finished(self) -> None:
+        # Keep last results, but drop the thread reference.
+        self._worker = None
+        self.btn_start.setEnabled(True)
+
+    def _start_transcription_process(
+        self,
+        session: SessionPaths,
+        mic_path: str,
+        out_path: str,
+        samplerate: int,
+        duration_s: float,
+        mic_label: str,
+        out_label: str,
+    ) -> None:
+        if self._proc is not None and self._proc.state() != QProcess.ProcessState.NotRunning:
+            QMessageBox.information(
+                self,
+                self._tr("Транскрипция", "Transcription"),
+                self._tr("Транскрипция уже выполняется", "Transcription is already running"),
+            )
+            return
+
+        # Use an external process to isolate native crashes in ASR backends.
+        self._proc = QProcess(self)
+        self._proc.setWorkingDirectory(os.getcwd())
+
+        py = sys.executable
+        script = str(Path(os.getcwd()) / "transcribe.py")
+
+        args = [
+            script,
+            "--mic",
+            mic_path,
+            "--loop",
+            out_path,
+            "--model",
+            str(self.model_combo.currentText()),
+            "--lang",
+            (self.lang_edit.text() or "ru").strip(),
+            "--ui-lang",
+            str(self._ui_lang),
+            "--device",
+            str(self.device_combo.currentText()),
+            "--compute",
+            str(self.compute_combo.currentText()),
+            "--mic-label",
+            mic_label,
+            "--out-label",
+            out_label,
+            "--out-txt",
+            str(session.transcript_txt),
+            "--out-json",
+            str(session.transcript_json),
+        ]
+
+        # UI: show busy state.
+        self.progress.setRange(0, 0)
+        self.btn_start.setEnabled(False)
+        self.btn_export_txt.setEnabled(False)
+        self.btn_export_json.setEnabled(False)
+
+        self._proc.setProgram(py)
+        self._proc.setArguments(args)
+        self._proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+
+        self._proc.finished.connect(self._on_proc_finished)
+        self._proc.readyReadStandardOutput.connect(self._on_proc_output)
+        self._proc.readyReadStandardError.connect(self._on_proc_output)
+
+        self._proc.start()
+
+    def _on_proc_output(self) -> None:
+        if self._proc is None:
+            return
+        try:
+            out_ba = self._proc.readAllStandardOutput()
+            err_ba = self._proc.readAllStandardError()
+            data = (bytes(out_ba.data()).decode("utf-8", errors="replace") if not out_ba.isEmpty() else "")
+            data += (bytes(err_ba.data()).decode("utf-8", errors="replace") if not err_ba.isEmpty() else "")
+        except Exception:
+            return
+        if data.strip():
+            # Non-intrusive: append to the transcript view.
+            cur = self.transcript_view.toPlainText()
+            if cur and not cur.endswith("\n"):
+                cur += "\n"
+            self.transcript_view.setPlainText(cur + data.strip() + "\n")
+
+    def _on_proc_finished(self, exit_code: int, _status) -> None:  # noqa: ANN001
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+
+        proc = self._proc
+        self._proc = None
+
+        # Re-enable start.
+        self.btn_start.setEnabled(True)
+
+        if exit_code != 0:
+            msg = ""
+            if proc is not None:
+                try:
+                    ba = proc.readAll()
+                    msg = bytes(ba.data()).decode("utf-8", errors="replace") if not ba.isEmpty() else ""
+                except Exception:
+                    msg = ""
+            QMessageBox.critical(
+                self,
+                self._tr("Ошибка распознавания", "Transcription error"),
+                self._tr(
+                    f"Процесс распознавания завершился с кодом {exit_code}.\n{msg}",
+                    f"Transcription process exited with code {exit_code}.\n{msg}",
+                ),
+            )
+            self.btn_export_txt.setEnabled(False)
+            self.btn_export_json.setEnabled(False)
+            return
+
+        # Load results from last session.
+        if self._last_session:
+            try:
+                txt = self._last_session.transcript_txt.read_text(encoding="utf-8")
+                js = self._last_session.transcript_json.read_text(encoding="utf-8")
+                self._last_txt = txt
+                self._last_json = js
+                self.transcript_view.setPlainText(txt)
+                self.btn_export_txt.setEnabled(True)
+                self.btn_export_json.setEnabled(True)
+                return
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    self._tr("Ошибка", "Error"),
+                    self._tr(
+                        f"Не удалось прочитать результаты распознавания: {e}",
+                        f"Failed to read transcription outputs: {e}",
+                    ),
+                )
 
     def _save_device_selection(self) -> None:
         if self._loading_settings:
@@ -807,6 +1086,53 @@ class MainWindow(QMainWindow):
                 self._set_combo_to_device(self.out_combo, default_dev.id)
 
     def closeEvent(self, event) -> None:  # noqa: ANN001
+        # Avoid Qt aborts like "QThread: Destroyed while thread is still running".
+        try:
+            if self._start_timer is not None:
+                QMessageBox.information(
+                    self,
+                    self._tr("Подождите", "Please wait"),
+                    self._tr("Скоро начнется запись (идет отсчет)", "Recording countdown is running"),
+                )
+                event.ignore()
+                return
+            if self._test_worker is not None and self._test_worker.isRunning():
+                QMessageBox.information(
+                    self,
+                    self._tr("Подождите", "Please wait"),
+                    self._tr("Идет тест источника", "Source test is running"),
+                )
+                event.ignore()
+                return
+            if self._live_worker is not None and self._live_worker.isRunning():
+                QMessageBox.information(
+                    self,
+                    self._tr("Подождите", "Please wait"),
+                    self._tr("Идет лайв транскрипция", "Live transcription is running"),
+                )
+                event.ignore()
+                return
+            if self._worker is not None and self._worker.isRunning():
+                QMessageBox.information(
+                    self,
+                    self._tr("Подождите", "Please wait"),
+                    self._tr("Идет транскрипция", "Transcription is running"),
+                )
+                event.ignore()
+                return
+            if self._proc is not None and self._proc.state() != QProcess.ProcessState.NotRunning:
+                QMessageBox.information(
+                    self,
+                    self._tr("Подождите", "Please wait"),
+                    self._tr("Идет транскрипция", "Transcription is running"),
+                )
+                event.ignore()
+                return
+        except Exception:
+            # If closeEvent fails, prefer safe behavior.
+            event.ignore()
+            return
+
         # Persist last known selections.
         self._save_device_selection()
         super().closeEvent(event)
@@ -814,6 +1140,18 @@ class MainWindow(QMainWindow):
     def _on_stop(self) -> None:
         if not self._recorder:
             return
+
+        try:
+            self._on_stop_impl()
+        except Exception:
+            QMessageBox.critical(self, self._tr("Ошибка", "Error"), traceback.format_exc())
+            # Make sure UI is not stuck.
+            self.btn_start.setEnabled(True)
+            self.btn_stop.setEnabled(False)
+
+    def _on_stop_impl(self) -> None:
+        # The original stop handler body (wrapped for safety).
+        assert self._recorder is not None
 
         self.btn_stop.setEnabled(False)
         try:
@@ -893,23 +1231,19 @@ class MainWindow(QMainWindow):
 
         mic_path = rec.mic_path if has_mic else ""
         out_path = rec.loopback_path if has_out else ""
-        self._worker = TranscribeWorker(
-            rec_samplerate=rec.samplerate,
+
+        # Transcribe in a separate process to avoid crashing the GUI
+        # if a native ASR backend fails.
+        assert self._last_session is not None
+        self._start_transcription_process(
+            session=self._last_session,
             mic_path=mic_path,
-            loop_path=out_path,
-            model_name=model_name,
-            language=language,
-            device=device,
-            compute_type=compute,
+            out_path=out_path,
+            samplerate=int(rec.samplerate),
+            duration_s=float(rec.duration_s),
             mic_label=mic_label,
             out_label=out_label,
-            duration_s=rec.duration_s,
-            ui_lang=str(self._ui_lang),
         )
-        self._worker.progress.connect(self.progress.setValue)
-        self._worker.done.connect(self._on_transcribed)
-        self._worker.failed.connect(self._on_transcribe_failed)
-        self._worker.start()
 
     def _start_live_if_enabled(self) -> None:
         self._live_enabled = bool(self.act_live.isChecked())
@@ -922,6 +1256,7 @@ class MainWindow(QMainWindow):
             return
 
         self._live_worker = LiveWorker(
+            parent=self,
             recorder=self._recorder,
             model_name=str(self.model_combo.currentText()),
             language=(self.lang_edit.text() or "ru").strip(),
@@ -1063,6 +1398,7 @@ class MainWindow(QMainWindow):
             )
 
         self._test_worker = AudioTestWorker(
+            parent=self,
             kind=kind,
             device_id=device_id,
             include_loopback=include_loopback,
@@ -1213,6 +1549,7 @@ class LiveWorker(QThread):
 
     def __init__(
         self,
+        parent: QObject | None,
         recorder: DualRecorder,
         model_name: str,
         language: str,
@@ -1226,7 +1563,7 @@ class LiveWorker(QThread):
         interval_s: float,
         window_s: float,
     ) -> None:
-        super().__init__()
+        super().__init__(parent)
         self._recorder = recorder
         self._model_name = model_name
         self._language = language
@@ -1245,6 +1582,7 @@ class LiveWorker(QThread):
             tr = WhisperTranscriber(
                 model_name=self._model_name,
                 language=self._language,
+                ui_lang=self._ui_lang,
                 device=self._device,
                 compute_type=self._compute_type,
             )
@@ -1305,6 +1643,7 @@ class AudioTestWorker(QThread):
 
     def __init__(
         self,
+        parent: QObject | None,
         kind: str,
         device_id: str,
         include_loopback: bool,
@@ -1314,7 +1653,7 @@ class AudioTestWorker(QThread):
         start_delay_s: int = 3,
         ui_lang: str = "ru",
     ) -> None:
-        super().__init__()
+        super().__init__(parent)
         self._kind = str(kind)
         self._device_id = str(device_id)
         self._include_loopback = bool(include_loopback)

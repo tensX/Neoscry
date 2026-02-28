@@ -27,6 +27,7 @@ Thumbs.db
 sessions/
 *.wav
 *.flac
+neoscry_crash.log
 
 # Secrets
 .env

@@ -43,6 +43,7 @@ Typical use cases: call recording, meeting notes, interviews, podcasts, voice me
 - GPU acceleration options: `auto/cuda/cpu` and compute type (`float16`, `int8`, ...)
 - Built-in source testing (record a few seconds, then play back)
 - Settings menu (gear): UI language (RU/EN), always-on-top, live draft
+- Re-transcribe any existing session (pick a `sessions/<timestamp>/` folder)
 
 ### Quick start
 
@@ -123,6 +124,7 @@ Neoscry записывает разговор из двух источников
 - Ускорение на GPU: `auto/cuda/cpu` и `compute` (`float16`, `int8`, ...)
 - Тест источников (пишет пару секунд, затем воспроизводит)
 - Меню настроек (⚙): язык интерфейса (RU/EN), поверх всех окон, лайв-черновик
+- Повторная транскрипция любой сохраненной сессии (выбор папки `sessions/<timestamp>/`)
 
 ### Быстрый старт
 
