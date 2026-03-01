@@ -67,6 +67,10 @@ python run.py
 - Windows: loopback capture uses WASAPI.
 - Linux: loopback depends on your audio stack (PulseAudio / PipeWire). You may need to select a monitor source ("*.monitor") as the “other side” input device.
 
+### GPU (CUDA)
+
+If you select `Device = cuda`, make sure CUDA runtime libraries are installed and available in `PATH` (for example `cublas64_12.dll` on Windows). The app includes `Settings -> Check GPU (CUDA)` and an optional `Install CUDA Toolkit (winget)` helper.
+
 ### How to use
 
 1) Pick sources:
