@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import traceback
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +18,10 @@ from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QInputDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -30,6 +34,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -51,6 +56,9 @@ from transcripto.transcript.merge import merge_and_sort, merge_consecutive_same_
 @dataclass(frozen=True)
 class SessionPaths:
     root: Path
+    meta_json: Path
+    label: str
+    slug: str
     mic_wav: Path
     loop_wav: Path
     transcript_txt: Path
@@ -112,6 +120,7 @@ class TranscribeWorker(QThread):
 
             meta = TranscriptMeta(
                 created_at=now_iso_local(),
+                session_label="",
                 language=self._language,
                 model=self._model_name,
                 samplerate=int(self._rec_samplerate),
@@ -133,6 +142,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Neoscry")
 
         self._start_delay_s = 4
+
+        self._current_session_label = ""
 
         self._settings = QSettings("Neoscry", "Neoscry")
         if not self._settings.allKeys():
@@ -261,6 +272,9 @@ class MainWindow(QMainWindow):
         self.act_transcribe_session = QAction(self)
         self.settings_menu.addAction(self.act_transcribe_session)
 
+        self.act_asr_settings = QAction(self)
+        self.settings_menu.addAction(self.act_asr_settings)
+
         self.act_check_gpu = QAction(self)
         self.settings_menu.addAction(self.act_check_gpu)
 
@@ -301,10 +315,9 @@ class MainWindow(QMainWindow):
         self.transcript_view.setReadOnly(True)
 
         layout.addWidget(self.devices_box, 0, 0)
-        layout.addWidget(self.model_box, 1, 0)
-        layout.addWidget(self.actions_box, 2, 0)
-        layout.addWidget(self.progress, 3, 0)
-        layout.addWidget(self.transcript_view, 4, 0)
+        layout.addWidget(self.actions_box, 1, 0)
+        layout.addWidget(self.progress, 2, 0)
+        layout.addWidget(self.transcript_view, 3, 0)
 
         self.setCentralWidget(root)
 
@@ -330,6 +343,7 @@ class MainWindow(QMainWindow):
         self.act_lang_en.triggered.connect(lambda: self._set_ui_language("en"))
 
         self.act_transcribe_session.triggered.connect(self._on_transcribe_existing_session)
+        self.act_asr_settings.triggered.connect(self._on_open_asr_settings)
         self.act_check_gpu.triggered.connect(self._on_check_gpu)
         self.act_install_cuda.triggered.connect(self._on_install_cuda)
 
@@ -337,6 +351,15 @@ class MainWindow(QMainWindow):
 
         # Apply initial texts (language is loaded from settings later).
         self._apply_ui_texts("ru")
+
+        # ASR settings dialog (model/language/device/compute).
+        self.asr_dialog = QDialog(self)
+        self.asr_dialog.setModal(False)
+        v = QVBoxLayout(self.asr_dialog)
+        v.addWidget(self.model_box)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.asr_dialog.close)
+        v.addWidget(buttons)
 
     def _wire_persistence(self) -> None:
         self.chk_mic.toggled.connect(lambda v: self._set("ui/record_mic", bool(v)))
@@ -481,6 +504,7 @@ class MainWindow(QMainWindow):
         # Settings menu
         self.btn_settings.setToolTip(self._tr("Настройки", "Settings"))
         self.act_transcribe_session.setText(self._tr("Повторная транскрипция...", "Re-transcribe session..."))
+        self.act_asr_settings.setText(self._tr("Распознавание...", "Transcription settings..."))
         self.act_check_gpu.setText(self._tr("Проверить GPU (CUDA)", "Check GPU (CUDA)"))
         self.act_install_cuda.setText(self._tr("Установить CUDA runtime (pip)", "Install CUDA runtime (pip)"))
         self.act_live.setText(self._tr("Лайв транскрипция (черновик)", "Live transcription (draft)"))
@@ -488,6 +512,11 @@ class MainWindow(QMainWindow):
         self.lang_menu.setTitle(self._tr("Язык интерфейса", "UI language"))
         self.act_lang_ru.setText("Русский")
         self.act_lang_en.setText("English")
+
+        try:
+            self.asr_dialog.setWindowTitle(self._tr("Распознавание", "Transcription"))
+        except Exception:
+            pass
 
         # Start button may be in a non-idle state (waiting/recording).
         if self._recorder is not None:
@@ -511,6 +540,11 @@ class MainWindow(QMainWindow):
                 self._start_live_if_enabled()
         else:
             self._stop_live()
+
+    def _on_open_asr_settings(self) -> None:
+        self.asr_dialog.show()
+        self.asr_dialog.raise_()
+        self.asr_dialog.activateWindow()
 
     def _on_transcribe_existing_session(self) -> None:
         try:
@@ -547,8 +581,12 @@ class MainWindow(QMainWindow):
                 return
 
             root = Path(session_dir)
+            label, slug = self._load_session_label_and_slug(root)
             session = SessionPaths(
                 root=root,
+                meta_json=root / "meta.json",
+                label=label,
+                slug=slug,
                 mic_wav=root / "mic.wav",
                 loop_wav=root / "loopback.wav",
                 transcript_txt=root / "transcript.txt",
@@ -808,6 +846,8 @@ class MainWindow(QMainWindow):
             mic_label,
             "--out-label",
             out_label,
+            "--session-label",
+            str(session.label),
             "--out-txt",
             str(session.transcript_txt),
             "--out-json",
@@ -978,9 +1018,26 @@ class MainWindow(QMainWindow):
             self.btn_export_txt.setEnabled(False)
             self.btn_export_json.setEnabled(False)
 
-            session = self._create_session_paths()
+            label = self._prompt_session_label()
+            if label is None:
+                return
+
+            self._current_session_label = label
+
+            session = self._create_session_paths(label)
             self._last_session = session
             session.root.mkdir(parents=True, exist_ok=True)
+
+            # Persist session metadata for later discovery.
+            try:
+                meta = {
+                    "created_at": now_iso_local(),
+                    "label": session.label,
+                    "slug": session.slug,
+                }
+                session.meta_json.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
 
             loopback_source = self._loopback_source_mode()
             loopback_mic_include_loopback = (self.loop_mode.currentIndex() == 1)
@@ -1009,6 +1066,140 @@ class MainWindow(QMainWindow):
             self._recorder = None
             self._show_slot_error(self._tr("Не удалось начать запись", "Failed to start recording"))
             self._cancel_pending_start()
+
+    def _prompt_session_label(self) -> str | None:
+        last = str(self._settings.value("ui/last_session_label", "")).strip()
+        if self._ui_lang == "en":
+            items = [
+                "Interview",
+                "Psychologist",
+                "Meeting",
+                "Call",
+                "Lecture",
+                "Other",
+            ]
+            title = "Session label"
+            prompt = "What are you recording?"
+        else:
+            items = [
+                "Интервью",
+                "Психолог",
+                "Встреча",
+                "Звонок",
+                "Лекция",
+                "Другое",
+            ]
+            title = "Метка сессии"
+            prompt = "Что записываем?"
+
+        if last and last not in items:
+            items.insert(0, last)
+
+        value, ok = QInputDialog.getItem(self, title, prompt, items, current=0, editable=True)
+        if not ok:
+            return None
+        label = str(value).strip()
+        if not label:
+            # Require a label so the folder name is meaningful.
+            QMessageBox.warning(
+                self,
+                self._tr("Ошибка", "Error"),
+                self._tr("Введите метку сессии", "Please enter a session label"),
+            )
+            return None
+
+        self._settings.setValue("ui/last_session_label", label)
+        return label
+
+    @staticmethod
+    def _translit_ru(s: str) -> str:
+        m = {
+            "а": "a",
+            "б": "b",
+            "в": "v",
+            "г": "g",
+            "д": "d",
+            "е": "e",
+            "ё": "e",
+            "ж": "zh",
+            "з": "z",
+            "и": "i",
+            "й": "y",
+            "к": "k",
+            "л": "l",
+            "м": "m",
+            "н": "n",
+            "о": "o",
+            "п": "p",
+            "р": "r",
+            "с": "s",
+            "т": "t",
+            "у": "u",
+            "ф": "f",
+            "х": "h",
+            "ц": "ts",
+            "ч": "ch",
+            "ш": "sh",
+            "щ": "sch",
+            "ъ": "",
+            "ы": "y",
+            "ь": "",
+            "э": "e",
+            "ю": "yu",
+            "я": "ya",
+        }
+        out = []
+        for ch in s:
+            lo = ch.lower()
+            if lo in m:
+                out.append(m[lo])
+            else:
+                out.append(ch)
+        return "".join(out)
+
+    def _slugify_label(self, label: str) -> str:
+        s = self._translit_ru(str(label))
+        s = s.strip().lower()
+        out: list[str] = []
+        prev_sep = False
+        for ch in s:
+            if "a" <= ch <= "z" or "0" <= ch <= "9":
+                out.append(ch)
+                prev_sep = False
+                continue
+            if ch in (" ", "-", "_", "."):
+                if not prev_sep:
+                    out.append("-")
+                    prev_sep = True
+                continue
+            # drop everything else
+        slug = "".join(out).strip("-")
+        return slug or "session"
+
+    def _load_session_label_and_slug(self, root: Path) -> tuple[str, str]:
+        # Prefer meta.json (created by this app).
+        try:
+            meta_path = root / "meta.json"
+            if meta_path.exists():
+                obj = json.loads(meta_path.read_text(encoding="utf-8"))
+                label = str(obj.get("label", "")).strip()
+                slug = str(obj.get("slug", "")).strip()
+                if not slug and label:
+                    slug = self._slugify_label(label)
+                return label, slug
+        except Exception:
+            pass
+
+        # Fallback: parse folder name "<ts>__<slug>".
+        try:
+            name = root.name
+            if "__" in name:
+                slug = name.split("__", 1)[1].strip()
+                return "", slug
+        except Exception:
+            pass
+
+        return "", ""
 
     def _on_start_tick(self) -> None:
         if self._start_timer is None or self._pending_start_params is None:
@@ -1391,6 +1582,7 @@ class MainWindow(QMainWindow):
             model_name=str(self.model_combo.currentText()),
             language=(self.lang_edit.text() or "ru").strip(),
             ui_lang=str(self._ui_lang),
+            session_label=str(self._current_session_label),
             device=str(self.device_combo.currentText()),
             compute_type=str(self.compute_combo.currentText()),
             enable_mic=bool(self.chk_mic.isChecked()),
@@ -1661,12 +1853,21 @@ class MainWindow(QMainWindow):
             return
         Path(path).write_text(self._last_json, encoding="utf-8")
 
-    def _create_session_paths(self) -> SessionPaths:
+    def _create_session_paths(self, label: str) -> SessionPaths:
         root = Path(os.getcwd()) / "sessions"
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        session_root = root / ts
+        slug = self._slugify_label(label)
+        base = root / f"{ts}__{slug}"
+        session_root = base
+        n = 2
+        while session_root.exists():
+            session_root = root / f"{ts}__{slug}-{n}"
+            n += 1
         return SessionPaths(
             root=session_root,
+            meta_json=session_root / "meta.json",
+            label=str(label).strip(),
+            slug=slug,
             mic_wav=session_root / "mic.wav",
             loop_wav=session_root / "loopback.wav",
             transcript_txt=session_root / "transcript.txt",
@@ -1684,6 +1885,7 @@ class LiveWorker(QThread):
         model_name: str,
         language: str,
         ui_lang: str,
+        session_label: str,
         device: str,
         compute_type: str,
         enable_mic: bool,
@@ -1698,6 +1900,7 @@ class LiveWorker(QThread):
         self._model_name = model_name
         self._language = language
         self._ui_lang = str(ui_lang).strip().lower() or "ru"
+        self._session_label = str(session_label).strip()
         self._device = device
         self._compute_type = compute_type
         self._enable_mic = enable_mic
@@ -1735,6 +1938,7 @@ class LiveWorker(QThread):
                 sr0 = int(getattr(self._recorder, "samplerate", 48000))
                 meta = TranscriptMeta(
                     created_at=now_iso_local(),
+                    session_label=self._session_label,
                     language=self._language,
                     model=self._model_name,
                     samplerate=sr0,
