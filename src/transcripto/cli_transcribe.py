@@ -19,7 +19,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--loop", default="", help="Path to loopback.wav (optional)")
 
     p.add_argument("--model", default="large-v3")
-    p.add_argument("--lang", default="ru")
+    p.add_argument("--lang", default="auto")
     p.add_argument("--ui-lang", default="ru")
     p.add_argument("--device", default="auto")
     p.add_argument("--compute", default="auto")
@@ -27,6 +27,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--mic-label", default="")
     p.add_argument("--out-label", default="")
     p.add_argument("--session-label", default="")
+    p.add_argument("--swap-speakers", action="store_true")
 
     p.add_argument("--out-txt", required=True)
     p.add_argument("--out-json", required=True)
@@ -77,16 +78,19 @@ def main(argv: list[str] | None = None) -> None:
 
         sr, dur = _infer_media_info([mic, loop])
 
+        model_name = str(args.model).strip() or "large-v3"
         tr = WhisperTranscriber(
-            model_name=str(args.model),
-            language=str(args.lang).strip() or "ru",
+            model_name=model_name,
+            language=str(args.lang).strip() or "auto",
             ui_lang=ui_lang,
             device=str(args.device),
             compute_type=str(args.compute),
         )
 
-        mic_segments = tr.transcribe_file(str(mic), speaker="me") if mic_ok else []
-        other_segments = tr.transcribe_file(str(loop), speaker="other") if loop_ok else []
+        mic_speaker = "other" if bool(args.swap_speakers) else "me"
+        loop_speaker = "me" if bool(args.swap_speakers) else "other"
+        mic_segments = tr.transcribe_file(str(mic), speaker=mic_speaker) if mic_ok else []
+        other_segments = tr.transcribe_file(str(loop), speaker=loop_speaker) if loop_ok else []
 
         merged = merge_and_sort(mic_segments + other_segments)
         merged = merge_consecutive_same_speaker(merged)
@@ -94,8 +98,8 @@ def main(argv: list[str] | None = None) -> None:
         meta = TranscriptMeta(
             created_at=now_iso_local(),
             session_label=str(args.session_label).strip(),
-            language=str(args.lang).strip() or "ru",
-            model=str(args.model),
+            language=str(args.lang).strip() or "auto",
+            model=model_name,
             samplerate=int(sr),
             mic_device=str(args.mic_label),
             output_device=str(args.out_label),

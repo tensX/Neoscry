@@ -5,6 +5,44 @@ from dataclasses import dataclass
 import numpy as np
 
 
+_HALLUCINATION_EXACT_PHRASES = {
+    "пиши с нормальной пунктуацией",
+    "use normal punctuation",
+    "use normal punctuation пиши с нормальной пунктуацией",
+    "расставляй правильные знаки препинания сохраняй смысл не исправляй термины и имена без необходимости",
+    "это точная транскрипция разговора расставляй правильные знаки препинания сохраняй смысл не исправляй термины и имена без необходимости",
+    "accurate conversation transcript with proper punctuation",
+    "this is an accurate conversation transcript use proper punctuation and casing preserve meaning and do not change technical terms or names unnecessarily",
+    "точная транскрипция разговора с правильной пунктуацией",
+    "продолжение следует",
+    "озвучено",
+    "субтитры сделал",
+    "субтитры создавал",
+    "субтитры подготовил",
+    "субтитры предоставил",
+    "субтитры подогнал",
+    "субтитры от",
+    "субтитры добавил",
+    "редактор субтитров",
+    "перевод и субтитры",
+    "спасибо за просмотр",
+    "подписывайтесь на канал",
+    "ставьте лайки",
+    "subtitles by",
+    "subtitles created by",
+    "translated by",
+    "captioned by",
+    "thanks for watching",
+    "please subscribe",
+    "like and subscribe",
+    "for more information visit www.fema.gov",
+    "легенда адриана занотто",
+    "legenda adriana zanotto",
+    "sous-titres réalisés para la communauté d'amara.org",
+    "subtitles created by the amara.org community",
+}
+
+
 @dataclass(frozen=True)
 class Segment:
     start: float
@@ -39,7 +77,7 @@ class WhisperTranscriber:
     def __init__(
         self,
         model_name: str = "large-v3",
-        language: str = "ru",
+        language: str = "auto",
         ui_lang: str = "ru",
         beam_size: int = 5,
         vad_filter: bool = True,
@@ -58,6 +96,51 @@ class WhisperTranscriber:
         self._model = None
         self.runtime_device: str | None = None
         self.runtime_compute_type: str | None = None
+
+    def _language_arg(self) -> str | None:
+        lang = str(self._language).strip().lower()
+        if lang in ("", "auto", "detect", "none"):
+            return None
+        return lang
+
+    def _initial_prompt(self) -> str | None:
+        lang = self._language_arg()
+        if lang == "en":
+            return "Use normal punctuation."
+        if lang == "ru":
+            return "Пиши с нормальной пунктуацией."
+        return "Use normal punctuation. Пиши с нормальной пунктуацией."
+
+    @staticmethod
+    def _is_prompt_hallucination(text: str) -> bool:
+        t = " ".join(str(text).lower().split())
+        if not t:
+            return True
+
+        t = t.strip(" .,!?:;…。。，、!！?？\"'“”()[]{}")
+        if t in _HALLUCINATION_EXACT_PHRASES:
+            return True
+
+        # Catch repeated hallucinations only when the segment is made entirely
+        # from the same known phrase repeated several times.
+        for phrase in _HALLUCINATION_EXACT_PHRASES:
+            compact = t.replace(phrase, "").strip(" .,!?:;…。。，、!！?？\"'“”()[]{}")
+            compact = compact.replace(".", "").replace(",", "")
+            if compact == "" and t.count(phrase) > 1:
+                return True
+
+        return False
+
+    def _transcribe_kwargs(self) -> dict:
+        return {
+            "language": self._language_arg(),
+            "beam_size": self._beam_size,
+            "best_of": max(5, self._beam_size),
+            "vad_filter": self._vad_filter,
+            "initial_prompt": self._initial_prompt(),
+            "condition_on_previous_text": True,
+            "word_timestamps": False,
+        }
 
     def _load(self):
         if self._model is not None:
@@ -148,9 +231,7 @@ class WhisperTranscriber:
         try:
             segments, _info = model.transcribe(
                 x,
-                language=self._language,
-                beam_size=self._beam_size,
-                vad_filter=self._vad_filter,
+                **self._transcribe_kwargs(),
             )
         except RuntimeError as e:
             # Some CUDA failures are raised lazily during inference (after model load).
@@ -159,9 +240,7 @@ class WhisperTranscriber:
                     model = self._force_cpu_model()
                     segments, _info = model.transcribe(
                         x,
-                        language=self._language,
-                        beam_size=self._beam_size,
-                        vad_filter=self._vad_filter,
+                        **self._transcribe_kwargs(),
                     )
                 else:
                     if self._ui_lang == "en":
@@ -183,7 +262,7 @@ class WhisperTranscriber:
         out: list[Segment] = []
         for s in segments:
             text = (s.text or "").strip()
-            if not text:
+            if not text or self._is_prompt_hallucination(text):
                 continue
             out.append(Segment(start=float(s.start), end=float(s.end), text=text, speaker=speaker))
         return out
@@ -193,9 +272,7 @@ class WhisperTranscriber:
         try:
             segments, _info = model.transcribe(
                 path,
-                language=self._language,
-                beam_size=self._beam_size,
-                vad_filter=self._vad_filter,
+                **self._transcribe_kwargs(),
             )
         except RuntimeError as e:
             if self.runtime_device == "cuda" and self._is_cuda_runtime_missing(e):
@@ -203,9 +280,7 @@ class WhisperTranscriber:
                     model = self._force_cpu_model()
                     segments, _info = model.transcribe(
                         path,
-                        language=self._language,
-                        beam_size=self._beam_size,
-                        vad_filter=self._vad_filter,
+                        **self._transcribe_kwargs(),
                     )
                 else:
                     if self._ui_lang == "en":
@@ -226,7 +301,7 @@ class WhisperTranscriber:
         out: list[Segment] = []
         for s in segments:
             text = (s.text or "").strip()
-            if not text:
+            if not text or self._is_prompt_hallucination(text):
                 continue
             out.append(Segment(start=float(s.start), end=float(s.end), text=text, speaker=speaker))
         return out
