@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -66,14 +67,16 @@ class DualRecorder:
         self._started_at_unix: float | None = None
         self._started_at_monotonic: float | None = None
         self._errors: dict[str, str] = {}
+        self._new_errors: dict[str, str] = {}
 
     @property
     def samplerate(self) -> int:
         return self._samplerate
 
     def start(self, mic_path: str, loopback_path: str) -> None:
-        if self._threads:
-            raise RuntimeError("Recording already started")
+        with self._lock:
+            if self._threads:
+                raise RuntimeError("Recording already started")
 
         if not self._record_mic and not self._record_output:
             raise RuntimeError("No streams selected")
@@ -81,28 +84,47 @@ class DualRecorder:
         self._mic_path = str(mic_path) if self._record_mic else ""
         self._loop_path = str(loopback_path) if self._record_output else ""
 
-        if self._record_mic:
-            Path(self._mic_path).parent.mkdir(parents=True, exist_ok=True)
-            self._mic_file = sf.SoundFile(self._mic_path, mode="w", samplerate=self._samplerate, channels=1, subtype="PCM_16")
-        if self._record_output:
-            Path(self._loop_path).parent.mkdir(parents=True, exist_ok=True)
-            self._loop_file = sf.SoundFile(self._loop_path, mode="w", samplerate=self._samplerate, channels=1, subtype="PCM_16")
+        # Open WAV sinks first so we fail fast on permission/path issues.
+        # If either open fails, close any already-opened handle to avoid a
+        # leaked file and a partially-written WAV header.
+        try:
+            if self._record_mic:
+                Path(self._mic_path).parent.mkdir(parents=True, exist_ok=True)
+                self._mic_file = sf.SoundFile(self._mic_path, mode="w", samplerate=self._samplerate, channels=1, subtype="PCM_16")
+            if self._record_output:
+                Path(self._loop_path).parent.mkdir(parents=True, exist_ok=True)
+                self._loop_file = sf.SoundFile(self._loop_path, mode="w", samplerate=self._samplerate, channels=1, subtype="PCM_16")
+        except Exception:
+            self._close_sinks_quiet()
+            raise
 
-        mic = None
-        loop = None
-        if self._record_mic:
-            mic = _get_microphone_by_id(self._mic_device_id, include_loopback=False)
-        if self._record_output:
-            if self._loopback_source == "mic":
-                if not self._loopback_mic_id:
-                    raise RuntimeError("Loopback microphone is not selected")
-                loop = _get_microphone_by_id(
-                    self._loopback_mic_id,
-                    include_loopback=self._loopback_mic_include_loopback,
-                )
-            else:
-                # Default: derive loopback endpoint from selected speaker id.
-                loop = _get_microphone_by_id(self._output_speaker_id, include_loopback=True)
+        try:
+            mic = None
+            loop = None
+            if self._record_mic:
+                mic = _get_microphone_by_id(self._mic_device_id, include_loopback=False)
+            if self._record_output:
+                if self._loopback_source == "mic":
+                    if not self._loopback_mic_id:
+                        raise RuntimeError("Loopback microphone is not selected")
+                    loop = _get_microphone_by_id(
+                        self._loopback_mic_id,
+                        include_loopback=self._loopback_mic_include_loopback,
+                    )
+                else:
+                    # Default: derive loopback endpoint from selected speaker id.
+                    # The soundcard library only exposes speaker-id loopback on
+                    # Windows (WASAPI). Fail with a clear message elsewhere
+                    # instead of the cryptic "Microphone not found".
+                    if sys.platform != "win32":
+                        raise RuntimeError(
+                            "Speaker-loopback capture is only supported on Windows. "
+                            "Use the 'Loopback (input device)' mode with a virtual audio cable."
+                        )
+                    loop = _get_microphone_by_id(self._output_speaker_id, include_loopback=True)
+        except Exception:
+            self._close_sinks_quiet()
+            raise
 
         self._stop.clear()
         with self._lock:
@@ -113,6 +135,7 @@ class DualRecorder:
             self._mic_samples = 0
             self._loop_samples = 0
         self._errors = {}
+        self._new_errors = {}
         self._started_at_unix = time.time()
         self._started_at_monotonic = time.monotonic()
 
@@ -134,18 +157,34 @@ class DualRecorder:
                 )
             )
 
-        self._threads = threads
-        for t in self._threads:
+        with self._lock:
+            self._threads = threads
+        for t in threads:
             t.start()
 
+    def _close_sinks_quiet(self) -> None:
+        for attr in ("_mic_file", "_loop_file"):
+            f = getattr(self, attr, None)
+            if f is None:
+                continue
+            try:
+                f.flush()
+                f.close()
+            except Exception:
+                pass
+            setattr(self, attr, None)
+
     def stop(self) -> DualRecording:
-        if not self._threads:
+        with self._lock:
+            threads = list(self._threads)
+        if not threads:
             raise RuntimeError("Recording not started")
 
         self._stop.set()
-        for t in self._threads:
+        for t in threads:
             t.join(timeout=5.0)
-        self._threads = []
+        with self._lock:
+            self._threads = []
 
         try:
             if self._mic_file is not None:
@@ -239,9 +278,20 @@ class DualRecorder:
                             self._push_live_chunk("loop", fx)
                             self._loop_samples += int(fx.shape[0])
         except Exception as e:
-            # Keep the other stream running if possible.
-            self._errors[kind] = f"{e}"
+            # Keep the other stream running, but record the failure so the
+            # main thread can pop it via pop_new_errors() and surface it
+            # instead of silently producing a half-empty session.
+            with self._lock:
+                self._errors[kind] = f"{e}"
+                self._new_errors[kind] = f"{e}"
             return
+
+    def pop_new_errors(self) -> dict[str, str]:
+        """Return errors that arrived since the last call, then clear them."""
+        with self._lock:
+            out = dict(self._new_errors)
+            self._new_errors = {}
+        return out
 
     def _push_live_chunk(self, kind: str, fx: np.ndarray) -> None:
         """Append to live ring buffer and trim efficiently.

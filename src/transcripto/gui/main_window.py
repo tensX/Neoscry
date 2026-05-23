@@ -164,7 +164,10 @@ class MainWindow(QMainWindow):
         self._last_json: str | None = None
         self._last_session: SessionPaths | None = None
         self._worker: TranscribeWorker | None = None
-        self._proc: QProcess | None = None
+        # Split processes so install/transcribe signals never cross-fire.
+        self._transcribe_proc: QProcess | None = None
+        self._transcribe_buf: list[str] = []
+        self._cuda_proc: QProcess | None = None
         self._live_enabled = False
         self._live_segments: list[Segment] = []
         self._live_worker: LiveWorker | None = None
@@ -567,7 +570,7 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-            if self._proc is not None and self._proc.state() != QProcess.ProcessState.NotRunning:
+            if self._transcribe_proc is not None and self._transcribe_proc.state() != QProcess.ProcessState.NotRunning:
                 QMessageBox.information(
                     self,
                     self._tr("Транскрипция", "Transcription"),
@@ -656,18 +659,18 @@ class MainWindow(QMainWindow):
 
     def _on_install_cuda(self) -> None:
         # Best-effort install of CUDA runtime wheels via pip (Windows).
-        if self._proc is not None and self._proc.state() != QProcess.ProcessState.NotRunning:
+        if self._cuda_proc is not None and self._cuda_proc.state() != QProcess.ProcessState.NotRunning:
             QMessageBox.information(
                 self,
                 self._tr("Установка", "Install"),
-                self._tr("Уже выполняется процесс", "A process is already running"),
+                self._tr("Установка CUDA уже выполняется", "CUDA install is already running"),
             )
             return
 
-        self._proc = QProcess(self)
-        self._proc.setWorkingDirectory(os.getcwd())
-        self._proc.setProgram(sys.executable)
-        self._proc.setArguments(
+        self._cuda_proc = QProcess(self)
+        self._cuda_proc.setWorkingDirectory(os.getcwd())
+        self._cuda_proc.setProgram(sys.executable)
+        self._cuda_proc.setArguments(
             [
                 "-m",
                 "pip",
@@ -677,10 +680,10 @@ class MainWindow(QMainWindow):
                 "nvidia-cuda-runtime-cu12",
             ]
         )
-        self._proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        self._proc.readyReadStandardOutput.connect(self._on_proc_output)
-        self._proc.readyReadStandardError.connect(self._on_proc_output)
-        self._proc.finished.connect(self._on_install_cuda_finished)
+        self._cuda_proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self._cuda_proc.readyReadStandardOutput.connect(self._on_cuda_output)
+        self._cuda_proc.readyReadStandardError.connect(self._on_cuda_output)
+        self._cuda_proc.finished.connect(self._on_install_cuda_finished)
 
         self.transcript_view.setPlainText(
             self._tr(
@@ -689,13 +692,29 @@ class MainWindow(QMainWindow):
             )
         )
         self.progress.setRange(0, 0)
-        self._proc.start()
+        self._cuda_proc.start()
+
+    def _on_cuda_output(self) -> None:
+        if self._cuda_proc is None:
+            return
+        try:
+            out_ba = self._cuda_proc.readAllStandardOutput()
+            err_ba = self._cuda_proc.readAllStandardError()
+            data = (bytes(out_ba.data()).decode("utf-8", errors="replace") if not out_ba.isEmpty() else "")
+            data += (bytes(err_ba.data()).decode("utf-8", errors="replace") if not err_ba.isEmpty() else "")
+        except Exception:
+            return
+        if data.strip():
+            cur = self.transcript_view.toPlainText()
+            if cur and not cur.endswith("\n"):
+                cur += "\n"
+            self.transcript_view.setPlainText(cur + data.strip() + "\n")
 
     def _on_install_cuda_finished(self, exit_code: int, _status) -> None:  # noqa: ANN001
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        proc = self._proc
-        self._proc = None
+        proc = self._cuda_proc
+        self._cuda_proc = None
 
         msg = ""
         if proc is not None:
@@ -819,7 +838,7 @@ class MainWindow(QMainWindow):
         mic_label: str,
         out_label: str,
     ) -> None:
-        if self._proc is not None and self._proc.state() != QProcess.ProcessState.NotRunning:
+        if self._transcribe_proc is not None and self._transcribe_proc.state() != QProcess.ProcessState.NotRunning:
             QMessageBox.information(
                 self,
                 self._tr("Транскрипция", "Transcription"),
@@ -828,8 +847,9 @@ class MainWindow(QMainWindow):
             return
 
         # Use an external process to isolate native crashes in ASR backends.
-        self._proc = QProcess(self)
-        self._proc.setWorkingDirectory(os.getcwd())
+        self._transcribe_proc = QProcess(self)
+        self._transcribe_proc.setWorkingDirectory(os.getcwd())
+        self._transcribe_buf = []
 
         py = sys.executable
         script = str(Path(os.getcwd()) / "transcribe.py")
@@ -870,26 +890,33 @@ class MainWindow(QMainWindow):
         self.btn_export_txt.setEnabled(False)
         self.btn_export_json.setEnabled(False)
 
-        self._proc.setProgram(py)
-        self._proc.setArguments(args)
-        self._proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self._transcribe_proc.setProgram(py)
+        self._transcribe_proc.setArguments(args)
+        self._transcribe_proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        # Child speaks UTF-8 JSON; force the same on its stdio so cp1252 default
+        # on Windows can't corrupt Cyrillic in error envelopes.
+        env = self._transcribe_proc.processEnvironment()
+        env.insert("PYTHONIOENCODING", "utf-8")
+        self._transcribe_proc.setProcessEnvironment(env)
 
-        self._proc.finished.connect(self._on_proc_finished)
-        self._proc.readyReadStandardOutput.connect(self._on_proc_output)
-        self._proc.readyReadStandardError.connect(self._on_proc_output)
+        self._transcribe_proc.finished.connect(self._on_proc_finished)
+        self._transcribe_proc.readyReadStandardOutput.connect(self._on_proc_output)
+        self._transcribe_proc.readyReadStandardError.connect(self._on_proc_output)
 
-        self._proc.start()
+        self._transcribe_proc.start()
 
     def _on_proc_output(self) -> None:
-        if self._proc is None:
+        if self._transcribe_proc is None:
             return
         try:
-            out_ba = self._proc.readAllStandardOutput()
-            err_ba = self._proc.readAllStandardError()
+            out_ba = self._transcribe_proc.readAllStandardOutput()
+            err_ba = self._transcribe_proc.readAllStandardError()
             data = (bytes(out_ba.data()).decode("utf-8", errors="replace") if not out_ba.isEmpty() else "")
             data += (bytes(err_ba.data()).decode("utf-8", errors="replace") if not err_ba.isEmpty() else "")
         except Exception:
             return
+        if data:
+            self._transcribe_buf.append(data)
         if data.strip():
             # Non-intrusive: append to the transcript view.
             cur = self.transcript_view.toPlainText()
@@ -897,12 +924,48 @@ class MainWindow(QMainWindow):
                 cur += "\n"
             self.transcript_view.setPlainText(cur + data.strip() + "\n")
 
+    @staticmethod
+    def _extract_envelope(buf: str) -> dict | None:
+        """Return the last JSON line from CLI output, if any."""
+        for line in reversed(buf.splitlines()):
+            line = line.strip()
+            if not line.startswith("{") or not line.endswith("}"):
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict) and "ok" in obj:
+                return obj
+        return None
+
+    def _offer_cuda_install(self, envelope: dict) -> None:
+        message = str(envelope.get("message") or "").strip()
+        prompt = self._tr(
+            "Не найден CUDA runtime (cublas64_12.dll).\n"
+            "Установить его сейчас через pip?",
+            "CUDA runtime (cublas64_12.dll) was not found.\n"
+            "Install it now via pip?",
+        )
+        body = (message + "\n\n" + prompt) if message else prompt
+        reply = QMessageBox.question(
+            self,
+            self._tr("CUDA не найден", "CUDA not found"),
+            body,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._on_install_cuda()
+
     def _on_proc_finished(self, exit_code: int, _status) -> None:  # noqa: ANN001
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
 
-        proc = self._proc
-        self._proc = None
+        proc = self._transcribe_proc
+        self._transcribe_proc = None
+        buf = "".join(self._transcribe_buf)
+        self._transcribe_buf = []
 
         # Re-enable start.
         self.btn_start.setEnabled(True)
@@ -934,13 +997,29 @@ class MainWindow(QMainWindow):
                     return
 
         if exit_code != 0:
-            msg = ""
-            if proc is not None:
-                try:
-                    ba = proc.readAll()
-                    msg = bytes(ba.data()).decode("utf-8", errors="replace") if not ba.isEmpty() else ""
-                except Exception:
-                    msg = ""
+            envelope = self._extract_envelope(buf)
+            if envelope and envelope.get("error") == "cuda_missing":
+                # Clear any stale exports — failed run must not allow saving.
+                self._last_txt = None
+                self._last_json = None
+                self.btn_export_txt.setEnabled(False)
+                self.btn_export_json.setEnabled(False)
+                self._offer_cuda_install(envelope)
+                return
+
+            if envelope:
+                msg = str(envelope.get("message") or envelope.get("detail") or "").strip()
+            else:
+                msg = ""
+                if proc is not None:
+                    try:
+                        ba = proc.readAll()
+                        msg = bytes(ba.data()).decode("utf-8", errors="replace") if not ba.isEmpty() else ""
+                    except Exception:
+                        msg = ""
+                if not msg:
+                    msg = buf.strip()
+
             QMessageBox.critical(
                 self,
                 self._tr("Ошибка распознавания", "Transcription error"),
@@ -949,6 +1028,8 @@ class MainWindow(QMainWindow):
                     f"Transcription process exited with code {exit_code}.\n{msg}",
                 ),
             )
+            self._last_txt = None
+            self._last_json = None
             self.btn_export_txt.setEnabled(False)
             self.btn_export_json.setEnabled(False)
 
@@ -1317,6 +1398,24 @@ class MainWindow(QMainWindow):
         ss = self._rec_elapsed_s % 60
         self._set_start_button_state("recording", left=(mm * 60 + ss))
 
+        # Surface stream failures (USB unplug, WASAPI drop) as they happen —
+        # otherwise the user only learns about a dead stream after stopping.
+        try:
+            new_errors = self._recorder.pop_new_errors()
+        except Exception:
+            new_errors = {}
+        if new_errors:
+            lines = [
+                f"{k}: {v}" for k, v in new_errors.items()
+            ]
+            banner = self._tr(
+                "Поток записи остановился из-за ошибки:\n",
+                "A recording stream stopped due to an error:\n",
+            ) + "\n".join(lines)
+            cur = self.transcript_view.toPlainText()
+            sep = "" if (not cur or cur.endswith("\n")) else "\n"
+            self.transcript_view.setPlainText(cur + sep + banner + "\n")
+
     def _cancel_pending_start(self) -> None:
         if self._start_timer is not None:
             try:
@@ -1455,11 +1554,19 @@ class MainWindow(QMainWindow):
                 )
                 event.ignore()
                 return
-            if self._proc is not None and self._proc.state() != QProcess.ProcessState.NotRunning:
+            if self._transcribe_proc is not None and self._transcribe_proc.state() != QProcess.ProcessState.NotRunning:
                 QMessageBox.information(
                     self,
                     self._tr("Подождите", "Please wait"),
                     self._tr("Идет транскрипция", "Transcription is running"),
+                )
+                event.ignore()
+                return
+            if self._cuda_proc is not None and self._cuda_proc.state() != QProcess.ProcessState.NotRunning:
+                QMessageBox.information(
+                    self,
+                    self._tr("Подождите", "Please wait"),
+                    self._tr("Идет установка CUDA", "CUDA install is running"),
                 )
                 event.ignore()
                 return

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Iterable
 
 import soundcard as sc
+
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,7 @@ def get_default_microphone_id() -> str | None:
         m = sc.default_microphone()
         return str(m.id) if m else None
     except Exception:
+        _log.warning("default microphone lookup failed", exc_info=True)
         return None
 
 
@@ -52,6 +57,7 @@ def get_default_speaker_id() -> str | None:
         s = sc.default_speaker()
         return str(s.id) if s else None
     except Exception:
+        _log.warning("default speaker lookup failed", exc_info=True)
         return None
 
 
@@ -64,6 +70,7 @@ def get_default_loopback_microphone_id() -> str | None:
         m = sc.get_microphone(s.id, include_loopback=True)
         return str(m.id) if m else None
     except Exception:
+        _log.warning("default loopback lookup failed", exc_info=True)
         return None
 
 

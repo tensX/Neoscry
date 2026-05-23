@@ -59,7 +59,45 @@ def _infer_media_info(paths: list[Path]) -> tuple[int, float]:
     return sr, dur
 
 
+def _classify_error(msg: str) -> str:
+    s = msg.lower()
+    if "cublas" in s and ".dll" in s:
+        return "cuda_missing"
+    if "cudart" in s and ".dll" in s:
+        return "cuda_missing"
+    if "libcublas" in s and (".so" in s or "cannot open shared object" in s):
+        return "cuda_missing"
+    if "libcudart" in s and (".so" in s or "cannot open shared object" in s):
+        return "cuda_missing"
+    return "unknown"
+
+
+def _emit(payload: dict) -> None:
+    # All status output goes through this JSON-per-line envelope so the GUI
+    # can dispatch on type without parsing free-form text.
+    try:
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+    except Exception:
+        # Last-resort: drop non-ASCII so we never die in the error reporter.
+        try:
+            safe = json.dumps(payload, ensure_ascii=True) + "\n"
+            sys.stdout.write(safe)
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+
 def main(argv: list[str] | None = None) -> None:
+    # Stdout on Windows defaults to cp1252, which cannot encode Cyrillic.
+    # Forcing UTF-8 keeps both the JSON envelope and any localized error
+    # messages printable instead of crashing the error reporter itself.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     args = _parse_args(list(sys.argv[1:] if argv is None else argv))
     ui_lang = str(args.ui_lang).strip().lower() or "ru"
 
@@ -112,24 +150,25 @@ def main(argv: list[str] | None = None) -> None:
         out_txt.write_text(txt, encoding="utf-8")
         out_json.write_text(js, encoding="utf-8")
 
-        # Also print a tiny JSON summary for callers.
-        print(json.dumps({"ok": True, "segments": len(merged)}, ensure_ascii=False))
+        _emit({"ok": True, "segments": len(merged)})
     except Exception as e:
-        msg = str(e)
-        if "cublas" in msg.lower() and "dll" in msg.lower() and "not found" in msg.lower():
+        raw = str(e)
+        code = _classify_error(raw)
+        if code == "cuda_missing":
             if ui_lang == "en":
-                msg = (
+                message = (
                     "GPU transcription failed: CUDA runtime libraries were not found (cublas).\n"
-                    "Install NVIDIA CUDA Toolkit/Runtime 12.x or switch Device to CPU.\n\n"
-                    + msg
+                    "Install NVIDIA CUDA Runtime 12.x or switch Device to CPU."
                 )
             else:
-                msg = (
+                message = (
                     "Не удалось распознать на GPU: не найдены CUDA-библиотеки (cublas).\n"
-                    "Установите NVIDIA CUDA Toolkit/Runtime 12.x или переключите устройство на CPU.\n\n"
-                    + msg
+                    "Установите NVIDIA CUDA Runtime 12.x или переключите устройство на CPU."
                 )
-        print(msg)
+        else:
+            message = raw
+
+        _emit({"ok": False, "error": code, "message": message, "detail": raw})
         raise SystemExit(2)
 
 
