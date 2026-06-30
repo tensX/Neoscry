@@ -228,8 +228,9 @@ class MainWindow(QMainWindow):
         self.model_box = QGroupBox()
         mlay = QGridLayout(self.model_box)
         self.model_combo = QComboBox()
-        self.model_combo.addItems(["large-v3", "medium", "small"])
-        self.lang_edit = QLineEdit("ru")
+        self.model_combo.addItems(["large-v3", "large-v3-turbo", "distil-large-v3", "medium", "small"])
+        self.lang_edit = QLineEdit("auto")
+        self.lang_edit.setPlaceholderText("auto / ru / en")
         self.device_combo = QComboBox()
         self.device_combo.addItems(["auto", "cuda", "cpu"])
         self.compute_combo = QComboBox()
@@ -291,6 +292,10 @@ class MainWindow(QMainWindow):
         self.act_on_top.setCheckable(True)
         self.settings_menu.addAction(self.act_on_top)
 
+        self.act_swap_speakers = QAction(self)
+        self.act_swap_speakers.setCheckable(True)
+        self.settings_menu.addAction(self.act_swap_speakers)
+
         self.settings_menu.addSeparator()
         self.lang_menu = QMenu(self)
         self.settings_menu.addMenu(self.lang_menu)
@@ -339,6 +344,7 @@ class MainWindow(QMainWindow):
         self.act_live.toggled.connect(self._on_live_toggled)
         self.act_on_top.toggled.connect(self._on_always_on_top)
         self.act_on_top.toggled.connect(lambda v: self._set("ui/always_on_top", bool(v)))
+        self.act_swap_speakers.toggled.connect(lambda v: self._set("asr/swap_speakers", bool(v)))
         self.act_lang_ru.triggered.connect(lambda: self._set_ui_language("ru"))
         self.act_lang_en.triggered.connect(lambda: self._set_ui_language("en"))
 
@@ -396,7 +402,7 @@ class MainWindow(QMainWindow):
             if i >= 0:
                 self.model_combo.setCurrentIndex(i)
 
-            lang = str(self._settings.value("asr/lang", "ru")).strip() or "ru"
+            lang = str(self._settings.value("asr/lang", "auto")).strip() or "auto"
             self.lang_edit.setText(lang)
 
             dev = str(self._settings.value("asr/device", "auto"))
@@ -414,6 +420,7 @@ class MainWindow(QMainWindow):
 
             self.act_live.setChecked(bool(self._settings.value("ui/live", False, bool)))
             self.act_on_top.setChecked(bool(self._settings.value("ui/always_on_top", False, bool)))
+            self.act_swap_speakers.setChecked(bool(self._settings.value("asr/swap_speakers", False, bool)))
 
             self.act_lang_ru.setChecked(self._ui_lang == "ru")
             self.act_lang_en.setChecked(self._ui_lang == "en")
@@ -459,9 +466,9 @@ class MainWindow(QMainWindow):
         self.model_box.setTitle(self._tr("Распознавание", "Transcription"))
         self.actions_box.setTitle(self._tr("Действия", "Actions"))
 
-        self.chk_mic.setText(self._tr("Записывать микрофон", "Record microphone"))
-        self.chk_out.setText(self._tr("Записывать выход", "Record output"))
-        self.lbl_other_source.setText(self._tr("Источник собеседника", "Other side source"))
+        self.chk_mic.setText(self._tr("Источник 'Я'", "'Me' source"))
+        self.chk_out.setText(self._tr("Источник 'Собеседник'", "'Other' source"))
+        self.lbl_other_source.setText(self._tr("Тип источника собеседника", "Other source type"))
         self.lbl_test.setText(self._tr("Проверка", "Test"))
 
         self.lbl_model.setText(self._tr("Модель", "Model"))
@@ -509,6 +516,7 @@ class MainWindow(QMainWindow):
         self.act_install_cuda.setText(self._tr("Установить CUDA runtime (pip)", "Install CUDA runtime (pip)"))
         self.act_live.setText(self._tr("Лайв транскрипция (черновик)", "Live transcription (draft)"))
         self.act_on_top.setText(self._tr("Поверх всех окон", "Always on top"))
+        self.act_swap_speakers.setText(self._tr("Поменять Я/Собеседник местами", "Swap Me/Other labels"))
         self.lang_menu.setTitle(self._tr("Язык интерфейса", "UI language"))
         self.act_lang_ru.setText("Русский")
         self.act_lang_en.setText("English")
@@ -780,7 +788,7 @@ class MainWindow(QMainWindow):
         out_label = self._tr("собеседник (из файла)", "other side (from file)") if has_out else ""
 
         model_name = str(self.model_combo.currentText())
-        language = (self.lang_edit.text() or "ru").strip()
+        language = (self.lang_edit.text() or "auto").strip()
         device = str(self.device_combo.currentText())
         compute = str(self.compute_combo.currentText())
 
@@ -835,7 +843,7 @@ class MainWindow(QMainWindow):
             "--model",
             str(self.model_combo.currentText()),
             "--lang",
-            (self.lang_edit.text() or "ru").strip(),
+            (self.lang_edit.text() or "auto").strip(),
             "--ui-lang",
             str(self._ui_lang),
             "--device",
@@ -853,6 +861,8 @@ class MainWindow(QMainWindow):
             "--out-json",
             str(session.transcript_json),
         ]
+        if self.act_swap_speakers.isChecked():
+            args.append("--swap-speakers")
 
         # UI: show busy state.
         self.progress.setRange(0, 0)
@@ -897,6 +907,32 @@ class MainWindow(QMainWindow):
         # Re-enable start.
         self.btn_start.setEnabled(True)
 
+        # Load results from last session first. Some native ASR backends can crash
+        # on process teardown after outputs were already written; treat existing
+        # outputs as success instead of showing a false failure dialog.
+        if self._last_session:
+            try:
+                txt = self._last_session.transcript_txt.read_text(encoding="utf-8")
+                js = self._last_session.transcript_json.read_text(encoding="utf-8")
+                if txt.strip() and js.strip():
+                    self._last_txt = txt
+                    self._last_json = js
+                    self.transcript_view.setPlainText(txt)
+                    self.btn_export_txt.setEnabled(True)
+                    self.btn_export_json.setEnabled(True)
+                    return
+            except Exception as e:
+                if exit_code == 0:
+                    QMessageBox.critical(
+                        self,
+                        self._tr("Ошибка", "Error"),
+                        self._tr(
+                            f"Не удалось прочитать результаты распознавания: {e}",
+                            f"Failed to read transcription outputs: {e}",
+                        ),
+                    )
+                    return
+
         if exit_code != 0:
             msg = ""
             if proc is not None:
@@ -915,28 +951,6 @@ class MainWindow(QMainWindow):
             )
             self.btn_export_txt.setEnabled(False)
             self.btn_export_json.setEnabled(False)
-            return
-
-        # Load results from last session.
-        if self._last_session:
-            try:
-                txt = self._last_session.transcript_txt.read_text(encoding="utf-8")
-                js = self._last_session.transcript_json.read_text(encoding="utf-8")
-                self._last_txt = txt
-                self._last_json = js
-                self.transcript_view.setPlainText(txt)
-                self.btn_export_txt.setEnabled(True)
-                self.btn_export_json.setEnabled(True)
-                return
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    self._tr("Ошибка", "Error"),
-                    self._tr(
-                        f"Не удалось прочитать результаты распознавания: {e}",
-                        f"Failed to read transcription outputs: {e}",
-                    ),
-                )
 
     def _save_device_selection(self) -> None:
         if self._loading_settings:
@@ -1546,7 +1560,7 @@ class MainWindow(QMainWindow):
         mic_label = str(self.mic_combo.currentText())
         out_label = str(self.out_combo.currentText())
         model_name = str(self.model_combo.currentText())
-        language = (self.lang_edit.text() or "ru").strip()
+        language = (self.lang_edit.text() or "auto").strip()
         device = str(self.device_combo.currentText())
         compute = str(self.compute_combo.currentText())
 
@@ -1580,9 +1594,10 @@ class MainWindow(QMainWindow):
             parent=self,
             recorder=self._recorder,
             model_name=str(self.model_combo.currentText()),
-            language=(self.lang_edit.text() or "ru").strip(),
+            language=(self.lang_edit.text() or "auto").strip(),
             ui_lang=str(self._ui_lang),
             session_label=str(self._current_session_label),
+            swap_speakers=bool(self.act_swap_speakers.isChecked()),
             device=str(self.device_combo.currentText()),
             compute_type=str(self.compute_combo.currentText()),
             enable_mic=bool(self.chk_mic.isChecked()),
@@ -1886,6 +1901,7 @@ class LiveWorker(QThread):
         language: str,
         ui_lang: str,
         session_label: str,
+        swap_speakers: bool,
         device: str,
         compute_type: str,
         enable_mic: bool,
@@ -1901,6 +1917,7 @@ class LiveWorker(QThread):
         self._language = language
         self._ui_lang = str(ui_lang).strip().lower() or "ru"
         self._session_label = str(session_label).strip()
+        self._swap_speakers = bool(swap_speakers)
         self._device = device
         self._compute_type = compute_type
         self._enable_mic = enable_mic
@@ -1923,13 +1940,13 @@ class LiveWorker(QThread):
                 all_segments: list[Segment] = []
                 if self._enable_mic:
                     x, sr, start_sample = self._recorder.get_recent_window("mic", window_s=self._window_s)
-                    segs = tr.transcribe(x, sr, speaker="me")
+                    segs = tr.transcribe(x, sr, speaker="other" if self._swap_speakers else "me")
                     for s in segs:
                         off = start_sample / sr
                         all_segments.append(Segment(start=s.start + off, end=s.end + off, text=s.text, speaker=s.speaker))
                 if self._enable_out:
                     x, sr, start_sample = self._recorder.get_recent_window("loop", window_s=self._window_s)
-                    segs = tr.transcribe(x, sr, speaker="other")
+                    segs = tr.transcribe(x, sr, speaker="me" if self._swap_speakers else "other")
                     for s in segs:
                         off = start_sample / sr
                         all_segments.append(Segment(start=s.start + off, end=s.end + off, text=s.text, speaker=s.speaker))

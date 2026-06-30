@@ -44,6 +44,7 @@ Typical use cases: call recording, meeting notes, interviews, podcasts, voice me
 - Built-in source testing (record a few seconds, then play back)
 - Settings menu (gear): UI language (RU/EN), always-on-top, live draft
 - Re-transcribe any existing session (pick a `sessions/<timestamp>/` folder)
+- Optional speaker-label swap when your mic/output sources are reversed
 
 ### Quick start
 
@@ -69,13 +70,13 @@ python run.py
 
 ### GPU (CUDA)
 
-If you select `Device = cuda`, make sure CUDA runtime libraries are installed and available in `PATH` (for example `cublas64_12.dll` on Windows). The app includes `Settings -> Check GPU (CUDA)` and an optional `Install CUDA Toolkit (winget)` helper.
+If you select `Device = cuda`, make sure CUDA runtime libraries are installed and loadable (for example `cublas64_12.dll` on Windows). The app includes `Settings -> Check GPU (CUDA)` and an optional `Install CUDA runtime (pip)` helper.
 
 ### How to use
 
 1) Pick sources:
-- Enable `Record microphone` and select your microphone
-- Enable `Record output` and select the “other side” source
+- Enable `'Me' source` and select the device that records you
+- Enable `'Other' source` and select the device that records the other side
 
 2) Pick ASR settings:
 - Model: best quality is usually `large-v3`
@@ -129,6 +130,7 @@ Neoscry записывает разговор из двух источников
 - Тест источников (пишет пару секунд, затем воспроизводит)
 - Меню настроек (⚙): язык интерфейса (RU/EN), поверх всех окон, лайв-черновик
 - Повторная транскрипция любой сохраненной сессии (выбор папки `sessions/<timestamp>/`)
+- Возможность поменять метки `Я`/`Собеседник` местами, если источники выбраны наоборот
 
 ### Быстрый старт
 
@@ -150,8 +152,8 @@ python run.py
 ### Как пользоваться
 
 1) Выберите источники:
-- Включите `Записывать микрофон` и выберите микрофон
-- Включите `Записывать выход` и выберите источник собеседника
+- Включите `Источник 'Я'` и выберите устройство, где записываетесь вы
+- Включите `Источник 'Собеседник'` и выберите устройство, где записывается собеседник
 
 2) Выберите настройки распознавания:
 - `Модель`: для максимальной точности чаще всего `large-v3`
