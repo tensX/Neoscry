@@ -1,6 +1,12 @@
-# Neoscry
+# Neoscry 🎙️📝
 
-Dual-source audio recorder + AI transcription for dialogs.
+[![GitHub stars](https://img.shields.io/github/stars/tensX/Neoscry?logo=github)](https://github.com/tensX/Neoscry/stargazers)
+![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)
+![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
+![UI](https://img.shields.io/badge/UI-PySide6-41CD52)
+![ASR](https://img.shields.io/badge/ASR-Whisper-f97316)
+
+Dual-source call/meeting recorder + AI transcription (speech-to-text) for Windows.
 
 - You: microphone input
 - Other side: system output via WASAPI loopback (Windows)
@@ -14,7 +20,9 @@ Exports:
 ## Contents
 
 - [English](#english)
+- [Keywords (EN)](#keywords-en)
 - [Русский](#русский)
+- [Ключевые слова (RU)](#ключевые-слова-ru)
 
 ---
 
@@ -22,7 +30,9 @@ Exports:
 
 ### What it does
 
-Neoscry records a conversation from two sources (mic + loopback/output) and produces a final, accurate transcript using Whisper (via `faster-whisper`).
+Neoscry records a conversation from two sources (mic + system audio via WASAPI loopback) and produces a final, accurate transcript using Whisper (via `faster-whisper`).
+
+Typical use cases: call recording, meeting notes, interviews, podcasts, voice memos, “system audio to text”.
 
 ### Features
 
@@ -78,13 +88,19 @@ Each session creates `sessions/<YYYYMMDD-HHMMSS>/`:
 - Loopback capture depends on Windows audio drivers and virtual devices (Voicemeeter, etc.).
 - If you see `data discontinuity in recording`, it means the OS/audio backend could not deliver audio in time (temporary gaps). Disabling live mode and/or lowering system load can help.
 
+## Keywords (EN)
+
+speech to text, speech-to-text, audio transcription, AI transcription, Whisper, faster-whisper, call recorder, meeting recorder, meeting notes, interview recorder, system audio recording, WASAPI loopback, Windows loopback recording, microphone + desktop audio, dual-source recording, PySide6 GUI, Python
+
 ---
 
 ## Русский
 
 ### Что это
 
-Neoscry записывает разговор из двух источников (микрофон + системный звук/loopback) и делает финальную точную транскрипцию на базе Whisper (через `faster-whisper`).
+Neoscry записывает разговор из двух источников (микрофон + системный звук через WASAPI loopback) и делает финальную точную транскрипцию на базе Whisper (через `faster-whisper`).
+
+Примеры: запись звонков, заметки по встречам, интервью, подкасты, диктовка, “системный звук в текст”.
 
 ### Возможности
 
@@ -139,3 +155,7 @@ python run.py
 
 - На Windows loopback/виртуальные устройства зависят от драйверов (Voicemeeter и т.п.).
 - Warning `data discontinuity in recording` означает, что в записи были краткие разрывы (не успели вовремя прочитать аудио). Часто помогает выключить лайв и/или снизить нагрузку.
+
+## Ключевые слова (RU)
+
+распознавание речи, речь в текст, транскрибация, транскрипция, AI транскрипция, Whisper, faster-whisper, запись звонков, запись встреч, заметки встреч, запись интервью, запись системного звука, WASAPI loopback, Windows loopback, запись микрофона и системного звука, два источника, PySide6, Python
