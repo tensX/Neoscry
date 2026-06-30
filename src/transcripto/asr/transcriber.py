@@ -214,7 +214,14 @@ class WhisperTranscriber:
         return False
 
     def _force_cpu_model(self):
+        import gc
+
         from faster_whisper import WhisperModel
+
+        # Drop the failed CUDA model first so its VRAM/handles can be released
+        # before we instantiate the CPU replacement.
+        self._model = None
+        gc.collect()
 
         ct = self._compute_type if self._compute_type != "auto" else "int8"
         self._model = WhisperModel(self._model_name, device="cpu", compute_type=ct)
@@ -222,86 +229,58 @@ class WhisperTranscriber:
         self.runtime_compute_type = ct
         return self._model
 
+    def _raise_localized_cuda_missing(self, original: Exception) -> None:
+        if self._ui_lang == "en":
+            raise RuntimeError(
+                "CUDA runtime libraries were not found (e.g., cublas/cudart). "
+                "Install NVIDIA CUDA Runtime/Toolkit (matching your faster-whisper build) "
+                "or switch Device to CPU/auto.\n\n"
+                f"Original error: {original}"
+            )
+        raise RuntimeError(
+            "Не найдены CUDA-библиотеки (например, cublas/cudart). "
+            "Установите NVIDIA CUDA Runtime/Toolkit (под вашу сборку faster-whisper) "
+            "или переключите устройство на CPU/auto.\n\n"
+            f"Оригинальная ошибка: {original}"
+        )
+
+    def _decode(self, source, speaker: str) -> list[Segment]:
+        """Run faster-whisper end-to-end and materialize segments.
+
+        faster-whisper returns a lazy generator from .transcribe(); CUDA runtime
+        errors can surface either at the .transcribe() call or during iteration,
+        so both phases must run inside the same try/except for the auto→CPU
+        fallback in transcribe()/transcribe_file() to work.
+        """
+        model = self._model
+        if model is None:
+            raise RuntimeError("Model is not loaded")
+        segments, _info = model.transcribe(source, **self._transcribe_kwargs())
+        out: list[Segment] = []
+        for s in segments:
+            text = (s.text or "").strip()
+            if not text or self._is_prompt_hallucination(text):
+                continue
+            out.append(Segment(start=float(s.start), end=float(s.end), text=text, speaker=speaker))
+        return out
+
+    def _decode_with_fallback(self, source, speaker: str) -> list[Segment]:
+        self._load()
+        try:
+            return self._decode(source, speaker)
+        except RuntimeError as e:
+            if self.runtime_device == "cuda" and self._is_cuda_runtime_missing(e):
+                if self._pref_device == "auto":
+                    self._force_cpu_model()
+                    return self._decode(source, speaker)
+                self._raise_localized_cuda_missing(e)
+            raise
+
     def transcribe(self, audio: np.ndarray, samplerate: int, speaker: str) -> list[Segment]:
-        x, sr = _resample_to_16000(audio, samplerate)
+        x, _sr = _resample_to_16000(audio, samplerate)
         if x.size == 0:
             return []
-
-        model = self._load()
-        try:
-            segments, _info = model.transcribe(
-                x,
-                **self._transcribe_kwargs(),
-            )
-        except RuntimeError as e:
-            # Some CUDA failures are raised lazily during inference (after model load).
-            if self.runtime_device == "cuda" and self._is_cuda_runtime_missing(e):
-                if self._pref_device == "auto":
-                    model = self._force_cpu_model()
-                    segments, _info = model.transcribe(
-                        x,
-                        **self._transcribe_kwargs(),
-                    )
-                else:
-                    if self._ui_lang == "en":
-                        raise RuntimeError(
-                            "CUDA runtime libraries were not found (e.g., cublas/cudart). "
-                            "Install NVIDIA CUDA Runtime/Toolkit (matching your faster-whisper build) "
-                            "or switch Device to CPU/auto.\n\n"
-                            f"Original error: {e}"
-                        )
-                    raise RuntimeError(
-                        "Не найдены CUDA-библиотеки (например, cublas/cudart). "
-                        "Установите NVIDIA CUDA Runtime/Toolkit (под вашу сборку faster-whisper) "
-                        "или переключите устройство на CPU/auto.\n\n"
-                        f"Оригинальная ошибка: {e}"
-                    )
-            else:
-                raise
-
-        out: list[Segment] = []
-        for s in segments:
-            text = (s.text or "").strip()
-            if not text or self._is_prompt_hallucination(text):
-                continue
-            out.append(Segment(start=float(s.start), end=float(s.end), text=text, speaker=speaker))
-        return out
+        return self._decode_with_fallback(x, speaker)
 
     def transcribe_file(self, path: str, speaker: str) -> list[Segment]:
-        model = self._load()
-        try:
-            segments, _info = model.transcribe(
-                path,
-                **self._transcribe_kwargs(),
-            )
-        except RuntimeError as e:
-            if self.runtime_device == "cuda" and self._is_cuda_runtime_missing(e):
-                if self._pref_device == "auto":
-                    model = self._force_cpu_model()
-                    segments, _info = model.transcribe(
-                        path,
-                        **self._transcribe_kwargs(),
-                    )
-                else:
-                    if self._ui_lang == "en":
-                        raise RuntimeError(
-                            "CUDA runtime libraries were not found (e.g., cublas/cudart). "
-                            "Install NVIDIA CUDA Runtime/Toolkit (matching your faster-whisper build) "
-                            "or switch Device to CPU/auto.\n\n"
-                            f"Original error: {e}"
-                        )
-                    raise RuntimeError(
-                        "Не найдены CUDA-библиотеки (например, cublas/cudart). "
-                        "Установите NVIDIA CUDA Runtime/Toolkit (под вашу сборку faster-whisper) "
-                        "или переключите устройство на CPU/auto.\n\n"
-                        f"Оригинальная ошибка: {e}"
-                    )
-            else:
-                raise
-        out: list[Segment] = []
-        for s in segments:
-            text = (s.text or "").strip()
-            if not text or self._is_prompt_hallucination(text):
-                continue
-            out.append(Segment(start=float(s.start), end=float(s.end), text=text, speaker=speaker))
-        return out
+        return self._decode_with_fallback(path, speaker)
