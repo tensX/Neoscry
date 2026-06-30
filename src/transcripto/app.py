@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import sys
 import warnings
+import faulthandler
+from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
 
 def main() -> None:
+    # Capture hard crashes (e.g., native library aborts) to a log file.
+    try:
+        crash_log = Path.cwd() / "neoscry_crash.log"
+        with crash_log.open("a", encoding="utf-8") as f:
+            faulthandler.enable(file=f, all_threads=True)
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
 
     # soundcard (Windows/MediaFoundation) can emit frequent warnings like
