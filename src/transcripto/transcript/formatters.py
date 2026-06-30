@@ -12,6 +12,7 @@ from transcripto.utils.timefmt import format_hhmmss
 @dataclass(frozen=True)
 class TranscriptMeta:
     created_at: str
+    session_label: str
     language: str
     model: str
     samplerate: int
@@ -30,6 +31,8 @@ def to_pretty_txt(meta: TranscriptMeta, segments: list[Segment], ui_lang: str = 
     if ui_lang == "en":
         lines.append("Transcript")
         lines.append(f"Date: {meta.created_at}")
+        if meta.session_label:
+            lines.append(f"Label: {meta.session_label}")
         lines.append(f"Language: {meta.language}")
         lines.append(f"Model: {meta.model}")
         lines.append(f"Duration: {format_hhmmss(meta.duration_s)}")
@@ -38,6 +41,8 @@ def to_pretty_txt(meta: TranscriptMeta, segments: list[Segment], ui_lang: str = 
     else:
         lines.append("Транскрипт")
         lines.append(f"Дата: {meta.created_at}")
+        if meta.session_label:
+            lines.append(f"Тема: {meta.session_label}")
         lines.append(f"Язык: {meta.language}")
         lines.append(f"Модель: {meta.model}")
         lines.append(f"Длительность: {format_hhmmss(meta.duration_s)}")

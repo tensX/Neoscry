@@ -88,7 +88,7 @@ If you select `Device = cuda`, make sure CUDA runtime libraries are installed an
 
 ### Where results are saved
 
-Each session creates `sessions/<YYYYMMDD-HHMMSS>/`:
+Each session creates `sessions/<YYYYMMDD-HHMMSS>__<label>/`:
 
 - `mic.wav` - microphone recording (if enabled)
 - `loopback.wav` - other-side recording (if enabled)
@@ -164,7 +164,7 @@ python run.py
 
 ### Где лежат результаты
 
-После каждой сессии создается папка `sessions/<YYYYMMDD-HHMMSS>/`:
+После каждой сессии создается папка `sessions/<YYYYMMDD-HHMMSS>__<метка>/`:
 
 - `mic.wav` — запись микрофона (если включено)
 - `loopback.wav` — запись собеседника (если включено)

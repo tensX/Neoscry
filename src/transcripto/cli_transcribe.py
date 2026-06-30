@@ -26,6 +26,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
     p.add_argument("--mic-label", default="")
     p.add_argument("--out-label", default="")
+    p.add_argument("--session-label", default="")
 
     p.add_argument("--out-txt", required=True)
     p.add_argument("--out-json", required=True)
@@ -92,6 +93,7 @@ def main(argv: list[str] | None = None) -> None:
 
         meta = TranscriptMeta(
             created_at=now_iso_local(),
+            session_label=str(args.session_label).strip(),
             language=str(args.lang).strip() or "ru",
             model=str(args.model),
             samplerate=int(sr),
