@@ -9,15 +9,25 @@ from PySide6.QtWidgets import QApplication
 def main() -> None:
     app = QApplication(sys.argv)
 
-    # soundcard (Windows/MediaFoundation) can emit frequent RuntimeWarning messages like
+    # soundcard (Windows/MediaFoundation) can emit frequent warnings like
     # "data discontinuity in recording" when the app can't keep up in real time.
-    # Keep the console usable by showing it at most once.
-    warnings.filterwarnings(
-        "once",
-        message="data discontinuity in recording",
-        category=RuntimeWarning,
-        module=r"soundcard\..*",
-    )
+    # Hide them to keep the console usable.
+    try:
+        from soundcard import SoundcardRuntimeWarning
+
+        warnings.filterwarnings(
+            "ignore",
+            message="data discontinuity in recording",
+            category=SoundcardRuntimeWarning,
+            module=r"soundcard\..*",
+        )
+    except Exception:
+        warnings.filterwarnings(
+            "ignore",
+            message="data discontinuity in recording",
+            category=RuntimeWarning,
+            module=r"soundcard\..*",
+        )
 
     # Delay importing Windows COM/MediaFoundation users until Qt is initialized.
     # This avoids OleInitialize() failures (0x80010106) caused by prior COM init.

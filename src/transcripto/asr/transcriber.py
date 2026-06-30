@@ -81,6 +81,9 @@ class WhisperTranscriber:
             except Exception as e:
                 if pref == "cuda":
                     raise RuntimeError(
+                        "CUDA selected, but initialization failed. "
+                        "Most likely a CPU-only build of ctranslate2 is installed. "
+                        f"Original error: {e}\n\n"
                         "CUDA выбран, но инициализация не удалась. "
                         "Скорее всего установлен CPU-only ctranslate2. "
                         f"Оригинальная ошибка: {e}"
