@@ -65,6 +65,16 @@ class WhisperTranscriber:
 
         from faster_whisper import WhisperModel
 
+        if pref := self._pref_device:
+            # Best-effort CUDA DLL bootstrap on Windows when using ctranslate2.
+            if pref in ("auto", "cuda"):
+                try:
+                    from transcripto.windows_cuda import ensure_cublas12_dll_available
+
+                    ensure_cublas12_dll_available()
+                except Exception:
+                    pass
+
         def _pick_compute(device: str) -> str:
             if self._compute_type != "auto":
                 return self._compute_type
@@ -82,18 +92,22 @@ class WhisperTranscriber:
                 self.runtime_compute_type = ct
                 return self._model
             except Exception as e:
-                if pref == "cuda":
-                    if self._ui_lang == "en":
+                # If CUDA runtime DLLs are missing and device is auto, fall back to CPU.
+                if pref == "auto" and self._is_cuda_runtime_missing(e):
+                    pass
+                else:
+                    if pref == "cuda":
+                        if self._ui_lang == "en":
+                            raise RuntimeError(
+                                "CUDA selected, but initialization failed. "
+                                "Most likely a CPU-only build of ctranslate2 is installed. "
+                                f"Original error: {e}"
+                            )
                         raise RuntimeError(
-                            "CUDA selected, but initialization failed. "
-                            "Most likely a CPU-only build of ctranslate2 is installed. "
-                            f"Original error: {e}"
+                            "CUDA выбран, но инициализация не удалась. "
+                            "Скорее всего установлен CPU-only ctranslate2. "
+                            f"Оригинальная ошибка: {e}"
                         )
-                    raise RuntimeError(
-                        "CUDA выбран, но инициализация не удалась. "
-                        "Скорее всего установлен CPU-only ctranslate2. "
-                        f"Оригинальная ошибка: {e}"
-                    )
 
         ct = _pick_compute("cpu")
         self._model = WhisperModel(self._model_name, device="cpu", compute_type=ct)

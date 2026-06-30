@@ -482,7 +482,7 @@ class MainWindow(QMainWindow):
         self.btn_settings.setToolTip(self._tr("Настройки", "Settings"))
         self.act_transcribe_session.setText(self._tr("Повторная транскрипция...", "Re-transcribe session..."))
         self.act_check_gpu.setText(self._tr("Проверить GPU (CUDA)", "Check GPU (CUDA)"))
-        self.act_install_cuda.setText(self._tr("Установить CUDA Toolkit (winget)", "Install CUDA Toolkit (winget)"))
+        self.act_install_cuda.setText(self._tr("Установить CUDA runtime (pip)", "Install CUDA runtime (pip)"))
         self.act_live.setText(self._tr("Лайв транскрипция (черновик)", "Live transcription (draft)"))
         self.act_on_top.setText(self._tr("Поверх всех окон", "Always on top"))
         self.lang_menu.setTitle(self._tr("Язык интерфейса", "UI language"))
@@ -563,6 +563,23 @@ class MainWindow(QMainWindow):
     def _on_check_gpu(self) -> None:
         # Quick diagnostics for CUDA DLLs.
         try:
+            # First, try to load via runtime wheels search path (Windows).
+            try:
+                from transcripto.windows_cuda import ensure_cublas12_dll_available
+
+                if ensure_cublas12_dll_available():
+                    QMessageBox.information(
+                        self,
+                        self._tr("GPU", "GPU"),
+                        self._tr(
+                            "cublas64_12.dll загружается (OK).",
+                            "cublas64_12.dll is loadable (OK).",
+                        ),
+                    )
+                    return
+            except Exception:
+                pass
+
             p = QProcess(self)
             p.setProgram("cmd")
             p.setArguments(["/c", "where cublas64_12.dll"])
@@ -584,15 +601,15 @@ class MainWindow(QMainWindow):
                     self,
                     self._tr("GPU", "GPU"),
                     self._tr(
-                        "cublas64_12.dll не найден в PATH.\nДля GPU-распознавания установите CUDA Toolkit/Runtime 12.x.",
-                        "cublas64_12.dll was not found in PATH.\nInstall CUDA Toolkit/Runtime 12.x for GPU transcription.",
+                        "cublas64_12.dll не найден.\nПопробуйте 'Установить CUDA runtime (pip)'.",
+                        "cublas64_12.dll was not found.\nTry 'Install CUDA runtime (pip)'.",
                     ),
                 )
         except Exception:
             QMessageBox.critical(self, self._tr("Ошибка", "Error"), traceback.format_exc())
 
     def _on_install_cuda(self) -> None:
-        # Best-effort non-interactive install via winget.
+        # Best-effort install of CUDA runtime wheels via pip (Windows).
         if self._proc is not None and self._proc.state() != QProcess.ProcessState.NotRunning:
             QMessageBox.information(
                 self,
@@ -603,17 +620,15 @@ class MainWindow(QMainWindow):
 
         self._proc = QProcess(self)
         self._proc.setWorkingDirectory(os.getcwd())
-        self._proc.setProgram("winget")
+        self._proc.setProgram(sys.executable)
         self._proc.setArguments(
             [
+                "-m",
+                "pip",
                 "install",
-                "-e",
-                "--id",
-                "Nvidia.CUDA",
-                "--source",
-                "winget",
-                "--accept-source-agreements",
-                "--accept-package-agreements",
+                "--upgrade",
+                "nvidia-cublas-cu12",
+                "nvidia-cuda-runtime-cu12",
             ]
         )
         self._proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -623,8 +638,8 @@ class MainWindow(QMainWindow):
 
         self.transcript_view.setPlainText(
             self._tr(
-                "Установка CUDA Toolkit через winget...\nЭто может занять время и может потребовать UAC.\n",
-                "Installing CUDA Toolkit via winget...\nThis may take a while and may require UAC.\n",
+                "Установка CUDA runtime (pip)...\nПосле установки нажмите 'Проверить GPU (CUDA)'.\n",
+                "Installing CUDA runtime (pip)...\nAfter install, click 'Check GPU (CUDA)'.\n",
             )
         )
         self.progress.setRange(0, 0)
@@ -649,8 +664,8 @@ class MainWindow(QMainWindow):
                 self,
                 self._tr("Установка", "Install"),
                 self._tr(
-                    f"winget завершился с кодом {exit_code}.\n{msg}",
-                    f"winget exited with code {exit_code}.\n{msg}",
+                    f"pip завершился с кодом {exit_code}.\n{msg}",
+                    f"pip exited with code {exit_code}.\n{msg}",
                 ),
             )
             return
@@ -659,8 +674,8 @@ class MainWindow(QMainWindow):
             self,
             self._tr("Установка", "Install"),
             self._tr(
-                "CUDA Toolkit установлен. Перезапустите приложение и проверьте GPU через 'Проверить GPU (CUDA)'.",
-                "CUDA Toolkit installed. Restart the app and run 'Check GPU (CUDA)'.",
+                "CUDA runtime установлен. Перезапустите приложение и проверьте GPU через 'Проверить GPU (CUDA)'.",
+                "CUDA runtime installed. Restart the app and run 'Check GPU (CUDA)'.",
             ),
         )
 
