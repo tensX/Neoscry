@@ -52,6 +52,7 @@ class WhisperTranscriber:
         self._beam_size = int(beam_size)
         self._vad_filter = bool(vad_filter)
         self._device = str(device)
+        self._pref_device = str(device).lower().strip() or "auto"
         self._compute_type = str(compute_type)
 
         self._model = None
@@ -69,7 +70,7 @@ class WhisperTranscriber:
                 return self._compute_type
             return "float16" if device == "cuda" else "int8"
 
-        pref = self._device.lower().strip()
+        pref = self._pref_device
         if pref not in ("auto", "cuda", "cpu"):
             pref = "auto"
 
@@ -100,18 +101,70 @@ class WhisperTranscriber:
         self.runtime_compute_type = ct
         return self._model
 
+    @staticmethod
+    def _is_cuda_runtime_missing(err: Exception) -> bool:
+        s = str(err).lower()
+        # Windows DLLs
+        if "cublas" in s and ".dll" in s:
+            return True
+        if "cudart" in s and ".dll" in s:
+            return True
+        # Linux shared objects
+        if "libcublas" in s and (".so" in s or "cannot open shared object" in s):
+            return True
+        if "libcudart" in s and (".so" in s or "cannot open shared object" in s):
+            return True
+        return False
+
+    def _force_cpu_model(self):
+        from faster_whisper import WhisperModel
+
+        ct = self._compute_type if self._compute_type != "auto" else "int8"
+        self._model = WhisperModel(self._model_name, device="cpu", compute_type=ct)
+        self.runtime_device = "cpu"
+        self.runtime_compute_type = ct
+        return self._model
+
     def transcribe(self, audio: np.ndarray, samplerate: int, speaker: str) -> list[Segment]:
         x, sr = _resample_to_16000(audio, samplerate)
         if x.size == 0:
             return []
 
         model = self._load()
-        segments, _info = model.transcribe(
-            x,
-            language=self._language,
-            beam_size=self._beam_size,
-            vad_filter=self._vad_filter,
-        )
+        try:
+            segments, _info = model.transcribe(
+                x,
+                language=self._language,
+                beam_size=self._beam_size,
+                vad_filter=self._vad_filter,
+            )
+        except RuntimeError as e:
+            # Some CUDA failures are raised lazily during inference (after model load).
+            if self.runtime_device == "cuda" and self._is_cuda_runtime_missing(e):
+                if self._pref_device == "auto":
+                    model = self._force_cpu_model()
+                    segments, _info = model.transcribe(
+                        x,
+                        language=self._language,
+                        beam_size=self._beam_size,
+                        vad_filter=self._vad_filter,
+                    )
+                else:
+                    if self._ui_lang == "en":
+                        raise RuntimeError(
+                            "CUDA runtime libraries were not found (e.g., cublas/cudart). "
+                            "Install NVIDIA CUDA Runtime/Toolkit (matching your faster-whisper build) "
+                            "or switch Device to CPU/auto.\n\n"
+                            f"Original error: {e}"
+                        )
+                    raise RuntimeError(
+                        "Не найдены CUDA-библиотеки (например, cublas/cudart). "
+                        "Установите NVIDIA CUDA Runtime/Toolkit (под вашу сборку faster-whisper) "
+                        "или переключите устройство на CPU/auto.\n\n"
+                        f"Оригинальная ошибка: {e}"
+                    )
+            else:
+                raise
 
         out: list[Segment] = []
         for s in segments:
@@ -123,12 +176,39 @@ class WhisperTranscriber:
 
     def transcribe_file(self, path: str, speaker: str) -> list[Segment]:
         model = self._load()
-        segments, _info = model.transcribe(
-            path,
-            language=self._language,
-            beam_size=self._beam_size,
-            vad_filter=self._vad_filter,
-        )
+        try:
+            segments, _info = model.transcribe(
+                path,
+                language=self._language,
+                beam_size=self._beam_size,
+                vad_filter=self._vad_filter,
+            )
+        except RuntimeError as e:
+            if self.runtime_device == "cuda" and self._is_cuda_runtime_missing(e):
+                if self._pref_device == "auto":
+                    model = self._force_cpu_model()
+                    segments, _info = model.transcribe(
+                        path,
+                        language=self._language,
+                        beam_size=self._beam_size,
+                        vad_filter=self._vad_filter,
+                    )
+                else:
+                    if self._ui_lang == "en":
+                        raise RuntimeError(
+                            "CUDA runtime libraries were not found (e.g., cublas/cudart). "
+                            "Install NVIDIA CUDA Runtime/Toolkit (matching your faster-whisper build) "
+                            "or switch Device to CPU/auto.\n\n"
+                            f"Original error: {e}"
+                        )
+                    raise RuntimeError(
+                        "Не найдены CUDA-библиотеки (например, cublas/cudart). "
+                        "Установите NVIDIA CUDA Runtime/Toolkit (под вашу сборку faster-whisper) "
+                        "или переключите устройство на CPU/auto.\n\n"
+                        f"Оригинальная ошибка: {e}"
+                    )
+            else:
+                raise
         out: list[Segment] = []
         for s in segments:
             text = (s.text or "").strip()

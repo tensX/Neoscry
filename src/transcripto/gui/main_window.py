@@ -260,6 +260,13 @@ class MainWindow(QMainWindow):
 
         self.act_transcribe_session = QAction(self)
         self.settings_menu.addAction(self.act_transcribe_session)
+
+        self.act_check_gpu = QAction(self)
+        self.settings_menu.addAction(self.act_check_gpu)
+
+        self.act_install_cuda = QAction(self)
+        self.settings_menu.addAction(self.act_install_cuda)
+
         self.settings_menu.addSeparator()
 
         self.act_live = QAction(self)
@@ -323,6 +330,8 @@ class MainWindow(QMainWindow):
         self.act_lang_en.triggered.connect(lambda: self._set_ui_language("en"))
 
         self.act_transcribe_session.triggered.connect(self._on_transcribe_existing_session)
+        self.act_check_gpu.triggered.connect(self._on_check_gpu)
+        self.act_install_cuda.triggered.connect(self._on_install_cuda)
 
         self._set_start_button_state("idle")
 
@@ -472,6 +481,8 @@ class MainWindow(QMainWindow):
         # Settings menu
         self.btn_settings.setToolTip(self._tr("Настройки", "Settings"))
         self.act_transcribe_session.setText(self._tr("Повторная транскрипция...", "Re-transcribe session..."))
+        self.act_check_gpu.setText(self._tr("Проверить GPU (CUDA)", "Check GPU (CUDA)"))
+        self.act_install_cuda.setText(self._tr("Установить CUDA Toolkit (winget)", "Install CUDA Toolkit (winget)"))
         self.act_live.setText(self._tr("Лайв транскрипция (черновик)", "Live transcription (draft)"))
         self.act_on_top.setText(self._tr("Поверх всех окон", "Always on top"))
         self.lang_menu.setTitle(self._tr("Язык интерфейса", "UI language"))
@@ -548,6 +559,110 @@ class MainWindow(QMainWindow):
             self._start_transcription_for_session(session)
         except Exception:
             QMessageBox.critical(self, self._tr("Ошибка", "Error"), traceback.format_exc())
+
+    def _on_check_gpu(self) -> None:
+        # Quick diagnostics for CUDA DLLs.
+        try:
+            p = QProcess(self)
+            p.setProgram("cmd")
+            p.setArguments(["/c", "where cublas64_12.dll"])
+            p.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+            p.start()
+            p.waitForFinished(5000)
+            out = bytes(p.readAll().data()).decode("utf-8", errors="replace").strip()
+            if p.exitCode() == 0 and out:
+                QMessageBox.information(
+                    self,
+                    self._tr("GPU", "GPU"),
+                    self._tr(
+                        f"Найдено cublas64_12.dll:\n{out}",
+                        f"Found cublas64_12.dll:\n{out}",
+                    ),
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    self._tr("GPU", "GPU"),
+                    self._tr(
+                        "cublas64_12.dll не найден в PATH.\nДля GPU-распознавания установите CUDA Toolkit/Runtime 12.x.",
+                        "cublas64_12.dll was not found in PATH.\nInstall CUDA Toolkit/Runtime 12.x for GPU transcription.",
+                    ),
+                )
+        except Exception:
+            QMessageBox.critical(self, self._tr("Ошибка", "Error"), traceback.format_exc())
+
+    def _on_install_cuda(self) -> None:
+        # Best-effort non-interactive install via winget.
+        if self._proc is not None and self._proc.state() != QProcess.ProcessState.NotRunning:
+            QMessageBox.information(
+                self,
+                self._tr("Установка", "Install"),
+                self._tr("Уже выполняется процесс", "A process is already running"),
+            )
+            return
+
+        self._proc = QProcess(self)
+        self._proc.setWorkingDirectory(os.getcwd())
+        self._proc.setProgram("winget")
+        self._proc.setArguments(
+            [
+                "install",
+                "-e",
+                "--id",
+                "Nvidia.CUDA",
+                "--source",
+                "winget",
+                "--accept-source-agreements",
+                "--accept-package-agreements",
+            ]
+        )
+        self._proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self._proc.readyReadStandardOutput.connect(self._on_proc_output)
+        self._proc.readyReadStandardError.connect(self._on_proc_output)
+        self._proc.finished.connect(self._on_install_cuda_finished)
+
+        self.transcript_view.setPlainText(
+            self._tr(
+                "Установка CUDA Toolkit через winget...\nЭто может занять время и может потребовать UAC.\n",
+                "Installing CUDA Toolkit via winget...\nThis may take a while and may require UAC.\n",
+            )
+        )
+        self.progress.setRange(0, 0)
+        self._proc.start()
+
+    def _on_install_cuda_finished(self, exit_code: int, _status) -> None:  # noqa: ANN001
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        proc = self._proc
+        self._proc = None
+
+        msg = ""
+        if proc is not None:
+            try:
+                ba = proc.readAll()
+                msg = bytes(ba.data()).decode("utf-8", errors="replace") if not ba.isEmpty() else ""
+            except Exception:
+                msg = ""
+
+        if exit_code != 0:
+            QMessageBox.critical(
+                self,
+                self._tr("Установка", "Install"),
+                self._tr(
+                    f"winget завершился с кодом {exit_code}.\n{msg}",
+                    f"winget exited with code {exit_code}.\n{msg}",
+                ),
+            )
+            return
+
+        QMessageBox.information(
+            self,
+            self._tr("Установка", "Install"),
+            self._tr(
+                "CUDA Toolkit установлен. Перезапустите приложение и проверьте GPU через 'Проверить GPU (CUDA)'.",
+                "CUDA Toolkit installed. Restart the app and run 'Check GPU (CUDA)'.",
+            ),
+        )
 
     def _start_transcription_for_session(self, session: SessionPaths) -> None:
         try:
